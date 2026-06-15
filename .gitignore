@@ -1,0 +1,29 @@
+config/local.config.js
+dist/
+.env
+.env.local
+.env.production
+node_modules/
+.DS_Store
+Thumbs.db
+*.log
+tools/proof-output.txt
+.env.kyno
+# Build artifacts
+release/
+release.zip
+
+# Deployment packages
+*.zip
+
+# Supabase temp files
+supabase/.temp/
+
+# Test reports
+tests/enterprise/reports/
+
+# Local VS Code
+.vscode/
+
+# Credentials and secrets
+tools/CREDENTIALS.md

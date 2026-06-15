@@ -1,0 +1,16 @@
+# لا تُرفع إلى Netlify — تسرّع الرفع وPost-processing
+supabase/
+tests/
+tools/
+docs/
+.vscode/
+*.sql
+*.ps1
+*.md
+.env
+.env.*
+.git/
+node_modules/
+.cursor/
+proof-output.txt
+tests/enterprise/reports/

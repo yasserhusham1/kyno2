@@ -1,0 +1,11 @@
+{
+  "deno.enable": true,
+  "deno.enablePaths": ["supabase/functions"],
+  "deno.config": "./supabase/functions/deno.json",
+  "deno.unstable": true,
+  "typescript.tsconfig": "supabase/functions/tsconfig.json",
+  "files.associations": {
+    "supabase/functions/**/index.ts": "typescript"
+  },
+  "snyk.advanced.autoSelectOrganization": true
+}

@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>KYNO كينو — دليل العملاء</title>
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+  @page { size: A4; margin: 0; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Cairo', 'Segoe UI', Tahoma, sans-serif;
+    color: #1a202c;
+    background: #fff;
+    line-height: 1.75;
+    font-size: 13px;
+  }
+  .page {
+    width: 210mm;
+    min-height: 297mm;
+    padding: 18mm 16mm;
+    page-break-after: always;
+    position: relative;
+  }
+  .page:last-child { page-break-after: auto; }
+
+  /* Cover */
+  .cover {
+    background: linear-gradient(145deg, #0a1628 0%, #1a365d 45%, #0d9488 100%);
+    color: #fff;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    padding: 24mm 20mm;
+  }
+  .cover-logo {
+    width: 88px; height: 88px;
+    background: rgba(255,255,255,0.12);
+    border-radius: 22px;
+    display: flex; align-items: center; justify-content: center;
+    margin-bottom: 20px;
+    border: 2px solid rgba(255,255,255,0.25);
+    font-size: 42px; font-weight: 800; color: #5eead4;
+  }
+  .cover h1 { font-size: 42px; font-weight: 800; letter-spacing: 2px; margin-bottom: 6px; }
+  .cover .sub-ar { font-size: 22px; font-weight: 700; color: #99f6e4; margin-bottom: 4px; }
+  .cover .sub-en { font-size: 11px; opacity: 0.75; letter-spacing: 3px; margin-bottom: 28px; }
+  .cover .tagline {
+    font-size: 16px; font-weight: 600; max-width: 420px;
+    background: rgba(255,255,255,0.08); padding: 14px 22px; border-radius: 14px;
+    border: 1px solid rgba(255,255,255,0.15);
+  }
+  .cover-footer {
+    position: absolute; bottom: 16mm; left: 0; right: 0;
+    font-size: 11px; opacity: 0.65;
+  }
+
+  /* Inner pages */
+  .header-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    border-bottom: 3px solid #0d9488; padding-bottom: 10px; margin-bottom: 18px;
+  }
+  .header-bar .brand { font-size: 18px; font-weight: 800; color: #1a365d; }
+  .header-bar .brand span { color: #0d9488; }
+  .header-bar .doc-type { font-size: 11px; color: #718096; }
+
+  h2 {
+    font-size: 17px; font-weight: 800; color: #1a365d;
+    margin: 18px 0 10px; padding-right: 12px;
+    border-right: 4px solid #0d9488;
+  }
+  h3 { font-size: 14px; font-weight: 700; color: #2d3748; margin: 12px 0 6px; }
+
+  p { margin-bottom: 8px; color: #4a5568; }
+
+  .intro-box {
+    background: linear-gradient(135deg, #f0fdfa, #ecfdf5);
+    border: 1px solid #99f6e4; border-radius: 12px;
+    padding: 14px 16px; margin-bottom: 16px;
+  }
+  .intro-box p { color: #234e52; font-weight: 600; font-size: 14px; margin: 0; }
+
+  .features-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0;
+  }
+  .feature-card {
+    background: #f7fafc; border: 1px solid #e2e8f0; border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .feature-card .icon { font-size: 20px; margin-bottom: 4px; }
+  .feature-card h3 { margin: 0 0 4px; font-size: 13px; color: #1a365d; }
+  .feature-card p { font-size: 11.5px; margin: 0; line-height: 1.6; }
+
+  ul { margin: 6px 20px 12px 0; color: #4a5568; }
+  ul li { margin-bottom: 4px; font-size: 12.5px; }
+
+  .steps { counter-reset: step; list-style: none; margin: 10px 0; padding: 0; }
+  .steps li {
+    counter-increment: step; position: relative;
+    padding: 10px 14px 10px 10px; margin-bottom: 8px;
+    background: #fff; border: 1px solid #e2e8f0; border-radius: 10px;
+    padding-right: 48px;
+  }
+  .steps li::before {
+    content: counter(step);
+    position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+    width: 28px; height: 28px; background: #0d9488; color: #fff;
+    border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: 13px;
+  }
+
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 10px 0; }
+  .box {
+    border-radius: 10px; padding: 12px 14px; border: 1px solid #e2e8f0;
+  }
+  .box.admin { background: #ebf8ff; border-color: #90cdf4; }
+  .box.emp { background: #faf5ff; border-color: #d6bcfa; }
+
+  table {
+    width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 12px;
+  }
+  th, td { border: 1px solid #e2e8f0; padding: 8px 10px; text-align: right; }
+  th { background: #1a365d; color: #fff; font-weight: 700; }
+  tr:nth-child(even) td { background: #f7fafc; }
+
+  .highlight {
+    background: #fffbeb; border: 1px solid #f6e05e; border-radius: 10px;
+    padding: 12px 14px; margin: 12px 0;
+  }
+  .highlight strong { color: #744210; }
+
+  .contact-box {
+    background: linear-gradient(135deg, #1a365d, #2c5282);
+    color: #fff; border-radius: 14px; padding: 18px 20px; margin-top: 16px; text-align: center;
+  }
+  .contact-box h3 { color: #99f6e4; margin-bottom: 8px; font-size: 16px; }
+  .contact-box p { color: rgba(255,255,255,0.9); margin-bottom: 4px; }
+
+  .page-num {
+    position: absolute; bottom: 10mm; left: 16mm;
+    font-size: 10px; color: #a0aec0;
+  }
+
+  @media print {
+    body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .page { page-break-after: always; }
+  }
+</style>
+</head>
+<body>
+
+<!-- صفحة الغلاف -->
+<div class="page cover">
+  <div class="cover-logo">K</div>
+  <h1>KYNO</h1>
+  <div class="sub-ar">كينو</div>
+  <div class="sub-en">COMPANY &amp; HR MANAGEMENT SYSTEM</div>
+  <div class="tagline">نظام متكامل لإدارة الموظفين والحضور والرواتب — مصمّم للشركات العراقية</div>
+  <div class="cover-footer">دليل العملاء · 2026</div>
+</div>
+
+<!-- صفحة 1: ما هو KYNO -->
+<div class="page">
+  <div class="header-bar">
+    <div class="brand">KYNO <span>كينو</span></div>
+    <div class="doc-type">دليل العملاء</div>
+  </div>
+
+  <h2>ما هو KYNO؟</h2>
+  <div class="intro-box">
+    <p>KYNO (كينو) منصة سحابية عربية تساعد شركتك على إدارة الموارد البشرية من مكان واحد — بدون تعقيد، بدون برامج ثقيلة، ومن أي جهاز متصل بالإنترنت.</p>
+  </div>
+
+  <p>سواء كنت شركة صغيرة أو مؤسسة بعدة فروع، يوفّر KYNO أدوات جاهزة لتسجيل الموظفين، متابعة الحضور والانصراف، إصدار الرواتب، وإدارة الخصومات والمكافآت والسلف — مع تقارير واضحة ولوحة تحكم لحظية.</p>
+
+  <h2>لماذا KYNO؟</h2>
+  <div class="features-grid">
+    <div class="feature-card">
+      <div class="icon">☁️</div>
+      <h3>سحابي بالكامل</h3>
+      <p>لا حاجة لخوادم أو تثبيت — افتح المتصفح وابدأ العمل فوراً.</p>
+    </div>
+    <div class="feature-card">
+      <div class="icon">🔒</div>
+      <h3>بيانات معزولة</h3>
+      <p>كل شركة لها بياناتها وإعداداتها الخاصة — لا خلط بين الشركات.</p>
+    </div>
+    <div class="feature-card">
+      <div class="icon">📱</div>
+      <h3>حضور بالجوال</h3>
+      <p>الموظف يسجّل حضوره من هاتفه عبر QR أو الجهاز المصرّح.</p>
+    </div>
+    <div class="feature-card">
+      <div class="icon">💰</div>
+      <h3>رواتب دقيقة</h3>
+      <p>إصدار كشوف رواتب شهرية مع خصومات التأخير والإضافي تلقائياً.</p>
+    </div>
+    <div class="feature-card">
+      <div class="icon">📊</div>
+      <h3>تقارير فورية</h3>
+      <p>رسوم بيانية وإحصائيات للحضور والرواتب والأقسام.</p>
+    </div>
+    <div class="feature-card">
+      <div class="icon">👥</div>
+      <h3>صلاحيات مرنة</h3>
+      <p>مدير كامل + مستخدمون بصلاحيات محددة حسب احتياجك.</p>
+    </div>
+  </div>
+
+  <h2>لمن هذا النظام؟</h2>
+  <ul>
+    <li><strong>مدير الشركة</strong> — يراقب كل شيء: موظفون، حضور، رواتب، تقارير.</li>
+    <li><strong>مسؤول الموارد البشرية</strong> — يدير السجلات اليومية بصلاحيات مخصصة.</li>
+    <li><strong>الموظف</strong> — يسجّل حضوره ويطّلع على راتبه وإشعاراته من جواله.</li>
+  </ul>
+  <div class="page-num">1</div>
+</div>
+
+<!-- صفحة 2: الميزات -->
+<div class="page">
+  <div class="header-bar">
+    <div class="brand">KYNO <span>كينو</span></div>
+    <div class="doc-type">الميزات الرئيسية</div>
+  </div>
+
+  <h2>إدارة الموظفين</h2>
+  <ul>
+    <li>إضافة وتعديل بيانات الموظف (الاسم، القسم، الوظيفة، الراتب).</li>
+    <li>تسجيل جهازين لكل موظف (هاتف + جهاز احتياطي).</li>
+    <li>رمز QR لتسجيل الهاتف بضغطة واحدة.</li>
+    <li>دعم الحضور عن بُعد للموظفين المصرّح لهم.</li>
+    <li>بحث سريع بالاسم في صفحات الحضور والرواتب.</li>
+  </ul>
+
+  <h2>الحضور والانصراف</h2>
+  <ul>
+    <li>تسجيل حضور وانصراف يدوي أو تلقائي من بوابة الموظف.</li>
+    <li>حساب التأخير والغياب والوقت الإضافي.</li>
+    <li>فلترة السجلات بالتاريخ واسم الموظف.</li>
+    <li>تصدير تقارير الحضور إلى Excel وPDF.</li>
+  </ul>
+
+  <h2>الرواتب والمالية</h2>
+  <ul>
+    <li>إصدار رواتب الشهر لجميع الموظفين دفعة واحدة.</li>
+    <li>خصومات التأخير حسب سياسة شركتك.</li>
+    <li>إدارة الخصومات والمكافآت والسلف (مع أقساط).</li>
+    <li>تنزيل قسيمة الراتب PDF للموظف أو للإدارة.</li>
+    <li>تصدير كشوف الرواتب إلى Excel.</li>
+  </ul>
+
+  <h2>الأقسام والتقارير</h2>
+  <ul>
+    <li>تعريف الأقسام والوظائف في شركتك.</li>
+    <li>لوحة تحكم بإحصائيات الحضور والرواتب اليومية.</li>
+    <li>تقارير شهرية ورسوم بيانية تفاعلية.</li>
+  </ul>
+  <div class="page-num">2</div>
+</div>
+
+<!-- صفحة 3: طريقة الاستخدام -->
+<div class="page">
+  <div class="header-bar">
+    <div class="brand">KYNO <span>كينو</span></div>
+    <div class="doc-type">طريقة الاستخدام</div>
+  </div>
+
+  <h2>طريقتان للدخول</h2>
+  <div class="two-col">
+    <div class="box admin">
+      <h3>👑 دخول الإدارة</h3>
+      <ul>
+        <li>اسم المستخدم + كلمة المرور</li>
+        <li>لوحة تحكم كاملة</li>
+        <li>إدارة كل بيانات الشركة</li>
+      </ul>
+    </div>
+    <div class="box emp">
+      <h3>👤 دخول الموظف</h3>
+      <ul>
+        <li>بدون كلمة مرور</li>
+        <li>تسجيل حضور / انصراف</li>
+        <li>عرض الراتب والإشعارات</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>خطوات البدء السريع</h2>
+  <ol class="steps">
+    <li>استلم رابط النظام وبيانات الدخول من مزوّد الخدمة.</li>
+    <li>سجّل دخولك كـ <strong>مدير شركة</strong> وعدّل إعدادات شركتك (الاسم، أوقات الدوام، العملة).</li>
+    <li>أضف الأقسام والموظفين من صفحة «الموظفون».</li>
+    <li>امسح رمز QR من هاتف كل موظف لتسجيل جهازه.</li>
+    <li>ابدأ متابعة الحضور من لوحة التحكم وصفحة «الحضور».</li>
+    <li>في نهاية الشهر: أصدر الرواتب من صفحة «الرواتب».</li>
+  </ol>
+
+  <h2>تسجيل جهاز الموظف (QR)</h2>
+  <p>من صفحة الموظف → «تسجيل جهاز» → يظهر رمز QR → الموظف يمسحه بكاميرا الهاتف → يُربط الجهاز تلقائياً. بعدها يستطيع تسجيل الدخول من تبويب «موظف» في صفحة الدخول.</p>
+
+  <div class="highlight">
+    <strong>💡 نصيحة:</strong> يمكنك إنشاء مستخدمين إضافيين (مثل مسؤول HR) من صفحة «المستخدمون والصلاحيات» وتحديد ما يستطيع كل واحد رؤيته أو تعديله.
+  </div>
+  <div class="page-num">3</div>
+</div>
+
+<!-- صفحة 4: الاشتراك والدعم -->
+<div class="page">
+  <div class="header-bar">
+    <div class="brand">KYNO <span>كينو</span></div>
+    <div class="doc-type">الاشتراك والدعم</div>
+  </div>
+
+  <h2>نظام الاشتراك</h2>
+  <p>يعمل KYNO بنموذج اشتراك شهري/دوري لكل شركة. عند اقتراب انتهاء الاشتراك:</p>
+  <ul>
+    <li>تظهر تنبيهات واضحة داخل لوحة التحكم.</li>
+    <li>يمكنك التواصل عبر واتساب لتجديد الاشتراك مباشرة.</li>
+    <li>رسالة واتساب جاهزة تتضمن اسم شركتك وكودها تلقائياً.</li>
+  </ul>
+
+  <h2>الدعم الفني</h2>
+  <table>
+    <tr><th>الخدمة</th><th>الوصف</th></tr>
+    <tr><td>زر «فريق الدعم»</td><td>في الشريط العلوي — للمساعدة التقنية واستفسارات النظام</td></tr>
+    <tr><td>تجديد الاشتراك</td><td>من تنبيهات الاشتراك أو صفحة الإعدادات</td></tr>
+    <tr><td>إشعارات المنصة</td><td>رسائل مهمة من إدارة KYNO تظهر لجميع الشركات</td></tr>
+    <tr><td>النسخ الاحتياطي</td><td>تصدير واستيراد بيانات شركتك من صفحة الإعدادات</td></tr>
+  </table>
+
+  <h2>الأمان والخصوصية</h2>
+  <ul>
+    <li>بيانات كل شركة معزولة تماماً عن الشركات الأخرى.</li>
+    <li>تسجيل دخول آمن مع جلسات مشفّرة.</li>
+    <li>ربط حضور الموظف بجهازه المعتمد (بصمة + IP).</li>
+    <li>اختياري: تقييد الحضور بموقع GPS محدد.</li>
+    <li>سجل نشاطات (Audit) لكل العمليات المهمة.</li>
+  </ul>
+
+  <h2>الإعدادات التي يمكنك تخصيصها</h2>
+  <div class="features-grid">
+    <div class="feature-card"><h3>🏢 الشركة</h3><p>الاسم، العملة، المنطقة الزمنية</p></div>
+    <div class="feature-card"><h3>⏰ الدوام</h3><p>أوقات البداية والنهاية، حد التأخير</p></div>
+    <div class="feature-card"><h3>📍 الموقع</h3><p>GPS للحضور من موقع الشركة</p></div>
+    <div class="feature-card"><h3>🎨 المظهر</h3><p>وضع داكن أو فاتح</p></div>
+  </div>
+
+  <div class="contact-box">
+    <h3>📞 تواصل معنا</h3>
+    <p>للاشتراك، التجديد، أو الدعم الفني — تواصل مع فريق KYNO عبر واتساب</p>
+    <p style="font-size:15px;font-weight:800;margin-top:8px;">من داخل النظام: زر «فريق الدعم» أو «تجديد الاشتراك»</p>
+  </div>
+  <div class="page-num">4</div>
+</div>
+
+<!-- صفحة 5: ملخص -->
+<div class="page">
+  <div class="header-bar">
+    <div class="brand">KYNO <span>كينو</span></div>
+    <div class="doc-type">ملخص سريع</div>
+  </div>
+
+  <h2>صفحات النظام — نظرة سريعة</h2>
+  <table>
+    <tr><th>الصفحة</th><th>ماذا تفعل؟</th></tr>
+    <tr><td>لوحة التحكم</td><td>ملخص اليوم: حاضرون، غائبون، متأخرون، رواتب</td></tr>
+    <tr><td>الموظفون</td><td>إضافة وتعديل الموظفين وتسجيل الأجهزة</td></tr>
+    <tr><td>الحضور</td><td>سجلات الحضور والانصراف والتصدير</td></tr>
+    <tr><td>الرواتب</td><td>إصدار ودفع وتصدير الرواتب</td></tr>
+    <tr><td>المالية</td><td>خصومات، مكافآت، سلف</td></tr>
+    <tr><td>الأقسام</td><td>إدارة الأقسام والوظائف</td></tr>
+    <tr><td>التقارير</td><td>رسوم بيانية وتحليلات</td></tr>
+    <tr><td>الإشعارات</td><td>سجل كل العمليات والتنبيهات</td></tr>
+    <tr><td>المستخدمون</td><td>حسابات إضافية وصلاحيات</td></tr>
+    <tr><td>الإعدادات</td><td>تخصيص الشركة والأمان والنسخ الاحتياطي</td></tr>
+  </table>
+
+  <h2>بوابة الموظف</h2>
+  <table>
+    <tr><th>الصفحة</th><th>ماذا تفعل؟</th></tr>
+    <tr><td>الرئيسية</td><td>تسجيل حضور / انصراف + سجل الأسبوع</td></tr>
+    <tr><td>الراتب</td><td>عرض الراتب وتنزيل PDF</td></tr>
+    <tr><td>الملف الشخصي</td><td>بيانات الموظف</td></tr>
+    <tr><td>الإشعارات</td><td>خصومات ومكافآت وسلف</td></tr>
+  </table>
+
+  <div class="intro-box" style="margin-top:20px;">
+    <p>KYNO — شريكك الرقمي لإدارة فريق عملك باحترافية. ابدأ اليوم ووفر وقتك وتكاليفك.</p>
+  </div>
+
+  <p style="text-align:center;color:#718096;font-size:11px;margin-top:24px;">
+    © 2026 KYNO · كينو · نظام إدارة الشركات والموارد البشرية<br>
+    هذا الدليل موجّه للعملاء — للاستفسارات تواصل مع فريق الدعم
+  </p>
+  <div class="page-num">5</div>
+</div>
+
+</body>
+</html>

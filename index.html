@@ -1,0 +1,1120 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KYNO كينو | نظام إدارة الشركات والموارد البشرية</title>
+<link rel="icon" href="assets/kyno-logo.png" type="image/png">
+<link rel="apple-touch-icon" href="assets/kyno-logo.png">
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;900&family=Tajawal:wght@300;400;500;700;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/sweetalert2/11.10.1/sweetalert2.all.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script>window.global = window.global || window;</script>
+<script>
+window.addEventListener('error', function(e) {
+  if (e.target && (e.target.src || e.target.href)) {
+    var src = e.target.src || e.target.href;
+    console.warn('Optional resource failed to load:', src);
+  }
+}, true);
+</script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" onerror="console.warn('XLSX not available')"></script>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://browser.sentry-cdn.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com; font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com data:; img-src 'self' data: blob: https:; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.ipify.org https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://browser.sentry-cdn.com https://*.ingest.sentry.io https://*.sentry.io; frame-src 'self' https://www.openstreetmap.org https://*.openstreetmap.org; object-src 'none'; base-uri 'self';">
+<link rel="stylesheet" href="css/app.css?v=20260618">
+<!-- defaults ثم local (اختياري) ثم public -->
+<script src="config/supabase.defaults.js"></script>
+<script src="config/local.config.js"></script>
+<script src="config/public.config.js?v=20260618"></script>
+<script src="js/core/app-version.js"></script>
+<script src="js/core/system-version-ui.js"></script>
+<script src="https://browser.sentry-cdn.com/8.45.0/bundle.tracing.min.js" crossorigin="anonymous"></script>
+<script src="js/core/sentry-init.js"></script>
+<script src="js/core/security.js"></script>
+<script src="js/core/html-sanitize.js"></script>
+<!-- KYNO modules (incremental — no rewrite) -->
+<script src="js/kyno/utils/retry-logic.js"></script>
+<script src="js/kyno/utils/performance.js"></script>
+<script src="js/kyno/utils/batch-processor.js"></script>
+<script src="js/kyno/security/sanitizer.js"></script>
+<script src="js/kyno/security/validation.js"></script>
+<script src="js/kyno/security/crypto.js"></script>
+<script src="js/kyno/security/rate-limiter.js"></script>
+<script src="js/kyno/core/logger.js"></script>
+<script src="js/kyno/core/error-handler.js"></script>
+<script src="js/kyno/core/offline-manager.js"></script>
+<script src="js/kyno/core/store.js"></script>
+<script src="js/kyno/api/supabase-client.js"></script>
+<script src="js/kyno/api/employee-api.js"></script>
+<script src="js/core/memory-auth-storage.js"></script>
+<script src="js/core/tenant-guard.js"></script>
+<script src="js/core/time-format.js"></script>
+<script src="js/analytics/chart-analytics.js"></script>
+<script src="js/core/cloud-sync.js"></script>
+<script src="js/core/conflict-resolver.js"></script>
+<script src="js/core/leave-guard.js"></script>
+<script src="js/core/rpc-mode.js"></script>
+<script src="js/core/employee-autocomplete.js"></script>
+<script src="js/core/storage.js"></script>
+<script src="js/core/session.js"></script>
+<script src="js/core/permissions.js?v=20260618"></script>
+<script src="js/core/permission-matrix.js"></script>
+<script src="js/core/super-admin-permissions.js"></script>
+<script src="js/utils/toast.js"></script>
+<script src="js/utils/loader.js"></script>
+<script src="js/utils/pdf.js"></script>
+<script src="js/services/auth-api.js?v=20260618"></script>
+</head>
+<body>
+
+<!-- =============================== LOGIN PAGE =============================== -->
+<div id="login-page">
+  <div class="login-bg"></div>
+  <div class="login-grid"></div>
+  <div class="login-box">
+    <div class="login-logo">
+      <div class="brand-mark" aria-hidden="true">
+        <img src="assets/kyno-logo.png" alt="KYNO">
+      </div>
+      <div class="brand-copy">
+        <h1 class="brand-en">KYNO</h1>
+        <div class="brand-divider"><span>كينو</span></div>
+        <p class="brand-tag-ar">نظام إدارة الشركات والموارد البشرية</p>
+        <p class="brand-tag-en">COMPANY &amp; HR MANAGEMENT SYSTEM</p>
+      </div>
+    </div>
+    <div class="login-tabs">
+      <button class="login-tab active" onclick="switchLoginTab('admin', this)">👑 مسؤول</button>
+      <button class="login-tab" onclick="switchLoginTab('emp', this)">👤 موظف</button>
+    </div>
+    <div id="admin-form">
+      <div class="form-group">
+        <label>اسم المستخدم</label>
+        <input type="text" id="username" placeholder="اسم المستخدم" autocomplete="username" autocapitalize="off" spellcheck="false">
+      </div>
+      <div class="form-group">
+        <label>كلمة المرور</label>
+        <input type="password" id="password" placeholder="••••••••" autocomplete="current-password">
+      </div>
+      <div id="login-error-msg" style="display:none;background:rgba(229,62,62,0.15);border:1px solid #e53e3e;border-radius:8px;padding:10px 14px;color:#fc8181;font-size:13px;margin-bottom:10px;text-align:center"></div>
+      <button class="btn-login" id="btn-admin-login" onclick="doLogin('admin')">
+        <span id="btn-login-text">تسجيل الدخول</span>
+        <i class="fa fa-sign-in-alt" id="btn-login-icon"></i>
+      </button>
+    </div>
+    <div id="emp-form" style="display:none">
+      <div class="emp-login-info">
+        <i class="fa fa-shield-alt" style="color:var(--accent);font-size:24px;display:block;margin-bottom:8px"></i>
+        <strong>دخول مرتبط ببصمة الجهاز</strong><br>
+        يُسمح بالدخول فقط من الأجهزة المصرّح بها عبر QR
+      </div>
+      <div class="form-group" style="margin-top:16px">
+        <label>بصمة الجهاز</label>
+        <input type="text" id="emp-login-fp" readonly dir="ltr" style="text-align:center;font-weight:700;color:#68d391;font-size:12px;background:rgba(0,0,0,0.2);border:1px solid var(--border);border-radius:10px;padding:10px;width:100%">
+      </div>
+      <div class="form-group" style="margin-top:8px">
+        <label>عنوان IP الحالي</label>
+        <input type="text" id="emp-login-ip" readonly placeholder="جارٍ الكشف..." dir="ltr" style="text-align:center;font-weight:700;color:var(--accent)">
+      </div>
+      <p class="login-hint" id="emp-login-status" style="margin-top:12px;margin-bottom:0">يتم التحقق من الجهاز...</p>
+      <button class="btn-login" style="margin-top:16px" id="btn-emp-login" onclick="doLogin('emp')" disabled>
+        🔐 دخول بتعريف الجهاز
+      </button>
+      <button class="btn-login" style="margin-top:8px;background:linear-gradient(135deg,#2563a8,#1a3a5c);border:1px solid var(--border)" onclick="showPhoneRegistrationPage()">
+        📱 تسجيل جهاز جديد
+      </button>
+    </div>
+    <p class="login-hint">نظام SaaS مؤمن بتشفير كامل • Multi-Tenant Architecture</p>
+    <p class="login-hint" style="margin-top:6px;opacity:0.85">KYNO <span id="login-app-version" class="app-version-badge">v1.0.0</span></p>
+  </div>
+</div>
+
+<!-- =============================== MAIN APP =============================== -->
+<div id="app">
+<div class="layout">
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <div class="sidebar-logo">
+        <div class="sidebar-brand-mark" aria-hidden="true">
+          <img src="assets/kyno-logo.png" alt="KYNO">
+        </div>
+        <div class="sidebar-brand-copy">
+          <strong>KYNO</strong>
+          <span>كينو</span>
+          <small>COMPANY &amp; HR MANAGEMENT</small>
+        </div>
+      </div>
+    </div>
+    <div class="sidebar-user">
+      <div class="user-avatar" id="sidebar-avatar">م</div>
+      <div class="user-info">
+        <h4 id="sidebar-name">المسؤول</h4>
+        <p id="sidebar-role">Admin</p>
+      </div>
+    </div>
+    <nav class="sidebar-nav" id="sidebar-nav">
+      <!-- Nav items will be injected by JS -->
+    </nav>
+    <div class="sidebar-footer">
+      <div class="nav-item" onclick="doLogout()" style="color:#fc8181">
+        <i class="fa fa-sign-out-alt"></i> تسجيل الخروج
+      </div>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main-content">
+    <!-- SIDEBAR OVERLAY -->
+    <div class="sidebar-overlay" id="sidebar-overlay" onclick="closeSidebar()"></div>
+    <div class="topbar">
+      <div id="cloud-offline-banner" class="cloud-offline-banner" style="display:none"></div>
+      <button class="hamburger-btn" id="hamburger-btn" onclick="toggleSidebar()" aria-label="القائمة">
+        <i class="fa fa-bars"></i>
+      </button>
+      <span class="topbar-title" id="topbar-title">لوحة التحكم</span>
+      <div class="live-dot">مباشر</div>
+      <button type="button" id="topbar-support-btn" class="topbar-support-btn" onclick="contactSupportTeam()" style="display:none" title="تواصل مع فريق الدعم">
+        <i class="fa-brands fa-whatsapp"></i>
+        <span class="topbar-support-label">فريق الدعم</span>
+      </button>
+      <div class="topbar-clock" id="clock">--:-- --</div>
+      <div class="cloud-sync-status" id="cloud-sync-status" style="display:none" role="status" aria-live="polite">
+        <i class="fa fa-cloud cloud-sync-status-icon"></i>
+        <span class="cloud-sync-status-hint"></span>
+      </div>
+      <div class="topbar-pending-sync" id="pending-sync-badge" style="display:none" aria-hidden="true">
+        <i class="fa fa-cloud-upload-alt"></i>
+        <span id="pending-sync-count">0</span>
+      </div>
+      <div class="topbar-notif" data-goto-page="notifications" role="button" tabindex="0" title="الإشعارات">
+        <i class="fa fa-bell"></i>
+        <span class="notif-dot"></span>
+      </div>
+      <button class="btn-logout" onclick="doLogout()">خروج</button>
+    </div>
+
+    <!-- Subscription Status Banner (dynamic) -->
+    <div id="subscription-banner" style="display:none"></div>
+    <!-- Platform announcements (super admin broadcasts) -->
+    <div id="platform-announcements-rail" class="platform-announcements-rail" aria-live="polite"></div>
+    <!-- Employee finance alerts (bonus / loan / deduction) -->
+    <div id="employee-finance-notifications-rail" class="platform-announcements-rail employee-finance-rail" aria-live="polite"></div>
+
+    <!-- ===== SUPER ADMIN PAGES ===== -->
+
+    <!-- SUPER ADMIN DASHBOARD -->
+    <div class="page sa-page" id="page-superadmin">
+      <div id="sa-dashboard-content">
+        <div style="text-align:center;padding:40px;color:var(--text-muted)"><i class="fa fa-spinner fa-spin fa-2x"></i><br>جارٍ تحميل البيانات...</div>
+      </div>
+    </div>
+
+    <!-- COMPANIES PAGE -->
+    <div class="page sa-page" id="page-sa-companies">
+      <div id="sa-companies-content">
+        <div style="text-align:center;padding:40px;color:var(--text-muted)"><i class="fa fa-spinner fa-spin fa-2x"></i></div>
+      </div>
+    </div>
+
+    <!-- SUBSCRIPTIONS PAGE -->
+    <div class="page sa-page" id="page-sa-subscriptions">
+      <div id="sa-subscriptions-content">
+        <div style="text-align:center;padding:40px;color:var(--text-muted)"><i class="fa fa-spinner fa-spin fa-2x"></i></div>
+      </div>
+    </div>
+
+    <!-- USERS PAGE -->
+    <div class="page sa-page" id="page-sa-users">
+      <div id="sa-users-content">
+        <div style="text-align:center;padding:40px;color:var(--text-muted)"><i class="fa fa-spinner fa-spin fa-2x"></i></div>
+      </div>
+    </div>
+
+    <!-- SUPER ADMIN TEAM -->
+    <div class="page sa-page" id="page-sa-team">
+      <div id="sa-team-content">
+        <div style="text-align:center;padding:40px;color:var(--text-muted)"><i class="fa fa-spinner fa-spin fa-2x"></i></div>
+      </div>
+    </div>
+
+    <!-- STATS PAGE -->
+    <div class="page sa-page" id="page-sa-stats">
+      <div id="sa-stats-content">
+        <div style="text-align:center;padding:40px;color:var(--text-muted)"><i class="fa fa-spinner fa-spin fa-2x"></i></div>
+      </div>
+    </div>
+
+    <!-- SYSTEM MONITORING -->
+    <div class="page sa-page" id="page-sa-monitoring">
+      <div id="sa-monitoring-content">
+        <div style="text-align:center;padding:40px;color:var(--text-muted)"><i class="fa fa-spinner fa-spin fa-2x"></i></div>
+      </div>
+    </div>
+
+    <!-- BACKUP CENTER -->
+    <div class="page sa-page" id="page-sa-backup">
+      <div id="sa-backup-content">
+        <div style="text-align:center;padding:40px;color:var(--text-muted)"><i class="fa fa-spinner fa-spin fa-2x"></i></div>
+      </div>
+    </div>
+
+    <!-- PLATFORM SETTINGS (WhatsApp + broadcasts) -->
+    <div class="page sa-page" id="page-sa-platform">
+      <div id="sa-platform-content">
+        <div style="text-align:center;padding:40px;color:var(--text-muted)"><i class="fa fa-spinner fa-spin fa-2x"></i></div>
+      </div>
+    </div>
+
+    <!-- SUPER ADMIN SETTINGS -->
+    <div class="page sa-page" id="page-sa-settings">
+      <div id="sa-settings-content">
+        <div style="text-align:center;padding:40px;color:var(--text-muted)"><i class="fa fa-spinner fa-spin fa-2x"></i></div>
+      </div>
+    </div>
+
+    <!-- ===== ADMIN PAGES ===== -->
+
+    <!-- DASHBOARD -->
+    <div class="page active" id="page-dashboard">
+      <div class="stats-grid">
+        <div class="stat-card green">
+          <i class="fa fa-user-check stat-icon"></i>
+          <div class="stat-label">الحاضرون اليوم</div>
+          <div class="stat-value green">23</div>
+          <div class="stat-sub">من أصل 30 موظف</div>
+          <div class="progress-bar"><div class="progress-fill" style="width:77%;background:#68d391"></div></div>
+        </div>
+        <div class="stat-card red">
+          <i class="fa fa-user-times stat-icon"></i>
+          <div class="stat-label">الغائبون</div>
+          <div class="stat-value red">4</div>
+          <div class="stat-sub">2 إجازة • 2 بدون عذر</div>
+          <div class="progress-bar"><div class="progress-fill" style="width:13%;background:#fc8181"></div></div>
+        </div>
+        <div class="stat-card yellow">
+          <i class="fa fa-clock stat-icon"></i>
+          <div class="stat-label">المتأخرون</div>
+          <div class="stat-value yellow">3</div>
+          <div class="stat-sub">متوسط التأخير 22 دقيقة</div>
+          <div class="progress-bar"><div class="progress-fill" style="width:10%;background:#f6e05e"></div></div>
+        </div>
+        <div class="stat-card blue">
+          <i class="fa fa-money-bill-wave stat-icon"></i>
+          <div class="stat-label">إجمالي الرواتب</div>
+          <div class="stat-value blue" style="font-size:26px">12.5M</div>
+          <div class="stat-sub">دينار عراقي / الشهر</div>
+        </div>
+        <div class="stat-card teal">
+          <i class="fa fa-hourglass-half stat-icon"></i>
+          <div class="stat-label">ساعات إضافية</div>
+          <div class="stat-value teal">47</div>
+          <div class="stat-sub">ساعة هذا الشهر</div>
+        </div>
+      </div>
+
+      <div class="charts-grid">
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title"><i class="fa fa-chart-bar"></i> الحضور الأسبوعي</div>
+          </div>
+          <canvas id="weekChart" height="180"></canvas>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title"><i class="fa fa-chart-pie"></i> حالة الحضور اليوم</div>
+          </div>
+          <canvas id="todayChart" height="180"></canvas>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:20px">
+        <div class="card-header">
+          <div class="card-title"><i class="fa fa-list"></i> آخر سجلات الحضور</div>
+          <span class="live-dot">مباشر</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>الموظف</th>
+                <th>القسم</th>
+                <th>الحضور والانصراف</th>
+                <th>الحالة</th>
+                <th>التأخير/الإضافي</th>
+              </tr>
+            </thead>
+            <tbody id="dashboard-table">
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- EMPLOYEES -->
+    <div class="page" id="page-employees">
+      <div class="search-bar">
+        <input type="text" class="search-input" id="emp-search" placeholder="🔍 بحث عن موظف..." oninput="filterEmployees()">
+        <button class="btn-add" data-perm="employees.add" onclick="addEmployee()"><i class="fa fa-plus"></i> إضافة موظف</button>
+      </div>
+      <div class="emp-grid" id="emp-grid"></div>
+    </div>
+
+    <!-- ATTENDANCE -->
+    <div class="page" id="page-attendance">
+      <div class="filter-bar">
+        <div class="name-autocomplete-wrap filter-name-wrap">
+          <input type="text" class="search-input filter-name-input" id="att-filter-name" placeholder="🔍 بحث باسم الموظف..." autocomplete="off" spellcheck="false">
+          <div class="name-autocomplete-list" id="att-filter-name-list"></div>
+        </div>
+        <select class="filter-select" id="att-filter-dept" onchange="buildAttendance()">
+          <option value="">كل الأقسام</option>
+        </select>
+        <select class="filter-select" id="att-filter-period" onchange="buildAttendance()">
+          <option value="today">اليوم</option>
+          <option value="week">هذا الأسبوع</option>
+          <option value="month">هذا الشهر</option>
+          <option value="all">الكل</option>
+        </select>
+        <select class="filter-select" id="att-filter-status" onchange="buildAttendance()">
+          <option value="">كل الحالات</option>
+          <option value="طبيعي">طبيعي</option>
+          <option value="متأخر">متأخر</option>
+          <option value="غياب">غياب</option>
+          <option value="إضافي">إضافي</option>
+        </select>
+        <button class="btn-add" data-perm="attendance.export" style="padding:10px 16px;font-size:13px" onclick="exportAttExcel()">
+          <i class="fa fa-file-excel"></i> تصدير Excel
+        </button>
+        <button class="btn-add" data-perm="attendance.export" style="padding:10px 16px;font-size:13px;background:linear-gradient(135deg,#e53e3e,#c53030)" onclick="exportAttPdf()">
+          <i class="fa fa-file-pdf"></i> تصدير PDF
+        </button>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title"><i class="fa fa-calendar-check"></i> سجل الحضور والانصراف</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn-add" data-perm="attendance.add" style="padding:10px 16px;font-size:13px" onclick="addAttRecord()">
+              <i class="fa fa-plus"></i> إضافة سجل
+            </button>
+            <button class="btn-add" data-perm="attendance.batch_delete" style="padding:10px 16px;font-size:13px;background:linear-gradient(135deg,#e53e3e,#c53030)" onclick="deleteAttRecordsBatch()">
+              <i class="fa fa-trash"></i> حذف دفعة
+            </button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>الموظف</th>
+                <th>القسم</th>
+                <th>التاريخ</th>
+                <th>الحضور</th>
+                <th>الانصراف</th>
+                <th>ساعات العمل</th>
+                <th>التأخير</th>
+                <th>الإضافي</th>
+                <th>الحالة</th>
+                <th>إجراءات</th>
+              </tr>
+            </thead>
+            <tbody id="att-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- DEVICE FINGERPRINT MANAGEMENT -->
+    <div class="page" id="page-device-mgmt">
+      <div class="card" id="att-device-mgmt-card">
+        <div class="card-header">
+          <div class="card-title"><i class="fa fa-mobile-alt"></i> إدارة بصمة الأجهزة</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <input type="text" class="search-input" id="dev-mgmt-search" placeholder="🔍 بحث باسم الموظف..." style="max-width:220px" oninput="buildDeviceManagement()">
+            <button type="button" class="btn-add" data-perm="device_mgmt.view" style="padding:8px 14px;font-size:12px" onclick="refreshDeviceManagementFromCloud()">
+              <i class="fa fa-sync-alt"></i> تحديث من السحابة
+            </button>
+          </div>
+        </div>
+        <p class="settings-hint" style="padding:0 16px 8px;margin:0">عدّل أو امسح بصمة الجهاز ليتمكن الموظف من مسح QR من هاتف جديد — البيانات تُحفظ في السحابة.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>الموظف</th>
+                <th>القسم</th>
+                <th>الهاتف 1</th>
+                <th>الهاتف 2</th>
+                <th>إجراء</th>
+              </tr>
+            </thead>
+            <tbody id="dev-mgmt-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- SALARIES -->
+    <div class="page" id="page-salaries">
+      <div class="filter-bar" style="margin-bottom:16px;justify-content:space-between">
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn-sm btn-primary" id="sal-tab-current" style="padding:10px 16px" onclick="switchSalaryTab('current')">
+            <i class="fa fa-money-check-alt"></i> كشوفات الرواتب
+          </button>
+          <button class="btn-sm" id="sal-tab-paid" data-perm="salaries.paid_view" style="padding:10px 16px" onclick="switchSalaryTab('paid')">
+            <i class="fa fa-archive"></i> الرواتب المدفوعة
+          </button>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn-add" data-perm="salaries.export" style="padding:10px 16px;font-size:13px;background:linear-gradient(135deg,#e53e3e,#c53030)" onclick="exportSalPdf()">
+            <i class="fa fa-file-pdf"></i> تصدير PDF
+          </button>
+          <button class="btn-add" data-perm="salaries.export" style="padding:10px 16px;font-size:13px;background:linear-gradient(135deg,#38a169,#276749)" onclick="exportSalExcel()">
+            <i class="fa fa-file-excel"></i> تصدير Excel
+          </button>
+        </div>
+      </div>
+      <div id="salary-current-panel">
+        <div class="filter-bar" style="margin-bottom:16px">
+          <div class="name-autocomplete-wrap filter-name-wrap">
+            <input type="text" class="search-input filter-name-input" id="sal-filter-name" placeholder="🔍 بحث باسم الموظف..." autocomplete="off" spellcheck="false">
+            <div class="name-autocomplete-list" id="sal-filter-name-list"></div>
+          </div>
+          <select class="filter-select" id="sal-filter-dept" onchange="buildSalaries()">
+            <option value="">كل الأقسام</option>
+          </select>
+          <select class="filter-select" id="sal-filter-status" onchange="buildSalaries()">
+            <option value="">كل الحالات</option>
+            <option value="مُصدر">مُصدر</option>
+            <option value="معلق">معلق</option>
+          </select>
+          <input type="text" class="filter-select" id="sal-filter-period-date" placeholder="فترة الراتب 2026/05/06" oninput="buildSalaries()">
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title"><i class="fa fa-money-check-alt"></i> كشوفات الرواتب</div>
+            <button class="btn-add" data-perm="salaries.add" style="font-size:13px;padding:10px 16px" onclick="issueAllSalaries()">
+              <i class="fa fa-magic"></i> إصدار الرواتب
+            </button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>الموظف</th>
+                  <th>القسم</th>
+                  <th>فترة الراتب</th>
+                  <th>الراتب الأساسي</th>
+                  <th>الخصومات</th>
+                  <th>الإضافي</th>
+                  <th>المكافآت</th>
+                  <th>الراتب النهائي</th>
+                  <th>الحالة</th>
+                  <th>إجراءات</th>
+                </tr>
+              </thead>
+              <tbody id="sal-table"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div id="salary-paid-panel" style="display:none">
+        <div class="filter-bar" style="margin-bottom:16px">
+          <input type="text" class="search-input" id="paid-sal-filter-name" placeholder="🔍 بحث باسم الموظف..." oninput="buildPaidSalaries()">
+          <select class="filter-select" id="paid-sal-filter-dept" onchange="buildPaidSalaries()">
+            <option value="">كل الأقسام</option>
+          </select>
+          <select class="filter-select" id="paid-sal-filter-role" onchange="buildPaidSalaries()">
+            <option value="">كل الوظائف</option>
+          </select>
+          <input type="text" class="filter-select" id="paid-sal-filter-period-date" placeholder="فترة الراتب 2026/05/06" oninput="buildPaidSalaries()">
+          <input type="text" class="filter-select" id="paid-sal-filter-paid-date" placeholder="تاريخ الدفع 2026/05/06" oninput="buildPaidSalaries()">
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title"><i class="fa fa-archive"></i> الرواتب المدفوعة</div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>الموظف</th>
+                  <th>القسم</th>
+                  <th>الوظيفة</th>
+                  <th>فترة الراتب</th>
+                  <th>تاريخ الدفع</th>
+                  <th>الراتب الأساسي</th>
+                  <th>الخصومات</th>
+                  <th>الإضافي</th>
+                  <th>المكافآت</th>
+                  <th>الصافي</th>
+                  <th>إجراءات</th>
+                </tr>
+              </thead>
+              <tbody id="paid-sal-table"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- FINANCE -->
+    <div class="page" id="page-finance">
+      <div class="stats-grid" style="margin-bottom:16px">
+        <div class="stat-card red"><i class="fa fa-minus-circle stat-icon"></i><div class="stat-label">إجمالي الخصومات</div><div class="stat-value red" id="fin-total-deduct">0</div><div class="stat-sub">هذه الفترة</div></div>
+        <div class="stat-card green"><i class="fa fa-plus-circle stat-icon"></i><div class="stat-label">إجمالي المكافآت</div><div class="stat-value green" id="fin-total-bonus">0</div><div class="stat-sub">هذه الفترة</div></div>
+        <div class="stat-card yellow"><i class="fa fa-hand-holding-usd stat-icon"></i><div class="stat-label">السلف النشطة</div><div class="stat-value yellow" id="fin-total-loans">0</div><div class="stat-sub">مباشر/أقساط</div></div>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title"><i class="fa fa-wallet"></i> الخصومات والمكافآت والسلف</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn-add" data-perm="finance.add" style="padding:10px 16px;font-size:13px" onclick="openFinanceItemForm()"><i class="fa fa-plus"></i> إضافة حركة</button>
+            <button class="btn-add" data-perm="finance.export" style="padding:10px 16px;font-size:13px;background:linear-gradient(135deg,#38a169,#276749)" onclick="exportFinanceReport()"><i class="fa fa-file-excel"></i> تقرير</button>
+          </div>
+        </div>
+        <div class="filter-bar" style="margin:0 0 12px">
+          <select class="filter-select" id="fin-filter-type" onchange="buildFinancePage()"><option value="">كل الأنواع</option><option value="deduction">خصم</option><option value="bonus">مكافأة</option><option value="loan">سلفة</option></select>
+          <select class="filter-select" id="fin-filter-emp" onchange="buildFinancePage()"><option value="">كل الموظفين</option></select>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>#</th><th>الموظف</th><th>النوع</th><th>المبلغ</th><th>الأقساط</th><th>الحالة</th><th>الملاحظات</th><th>إجراءات</th></tr></thead>
+            <tbody id="finance-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- LEAVES & ABSENCE MANAGEMENT -->
+    <div class="page" id="page-leaves">
+      <div class="filter-bar">
+        <input type="text" class="search-input filter-name-input" id="leaves-filter-emp" placeholder="🔍 بحث باسم الموظف..." oninput="filterLeaves()" style="max-width:220px">
+        <select class="filter-select" id="leaves-filter-dept" onchange="filterLeaves()">
+          <option value="">كل الأقسام</option>
+        </select>
+        <select class="filter-select" id="leaves-filter-type" onchange="filterLeaves()">
+          <option value="">كل الأنواع</option>
+          <option value="paid_open">إجازة مفتوحة براتب</option>
+          <option value="unpaid_open">إجازة مفتوحة بدون راتب</option>
+          <option value="paid_single">إجازة مدفوعة (يوم)</option>
+          <option value="unpaid_single">إجازة غير مدفوعة (يوم)</option>
+          <option value="absence_mult">غياب مضاعف</option>
+        </select>
+        <button class="btn-add" data-perm="leaves.add" onclick="openAddLeaveForm()" style="padding:10px 18px">
+          <i class="fa fa-plus"></i> إضافة إجازة / غياب
+        </button>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title"><i class="fa fa-calendar-alt"></i> سجل الإجازات والغياب</div>
+        </div>
+        <div id="leaves-content"></div>
+      </div>
+    </div>
+
+    <!-- ORG STRUCTURE -->
+    <div class="page" id="page-org">
+      <div class="charts-grid">
+        <div class="card">
+          <div class="card-header"><div class="card-title"><i class="fa fa-building"></i> الأقسام</div><button class="btn-add" data-perm="org.add" style="padding:10px 16px;font-size:13px" onclick="openOrgItemForm('dept')"><i class="fa fa-plus"></i> إضافة قسم</button></div>
+          <div class="table-wrap org-table-wrap"><table class="org-table"><thead><tr><th>#</th><th>القسم</th><th>عدد الموظفين</th><th>إجراءات</th></tr></thead><tbody id="dept-table"></tbody></table></div>
+        </div>
+        <div class="card">
+          <div class="card-header"><div class="card-title"><i class="fa fa-briefcase"></i> الوظائف</div><button class="btn-add" data-perm="org.add" style="padding:10px 16px;font-size:13px" onclick="openOrgItemForm('job')"><i class="fa fa-plus"></i> إضافة وظيفة</button></div>
+          <div class="table-wrap org-table-wrap"><table class="org-table"><thead><tr><th>#</th><th>الوظيفة</th><th>عدد الموظفين</th><th>إجراءات</th></tr></thead><tbody id="job-table"></tbody></table></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- REPORTS -->
+    <div class="page" id="page-reports">
+      <div class="charts-grid" style="margin-bottom:20px">
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title"><i class="fa fa-chart-line"></i> الحضور الشهري</div>
+          </div>
+          <canvas id="monthChart" height="200"></canvas>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title"><i class="fa fa-chart-bar"></i> أداء الأقسام</div>
+          </div>
+          <canvas id="deptChart" height="200"></canvas>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title" style="margin-bottom:16px"><i class="fa fa-trophy"></i> أكثر الموظفين التزاماً</div>
+        <div id="top-emp-list"></div>
+      </div>
+    </div>
+
+    <!-- NOTIFICATIONS -->
+    <div class="page" id="page-notifications">
+      <div class="card" id="notif-page-header" style="margin-bottom:16px;display:none">
+        <div class="card-header" style="margin-bottom:0">
+          <div>
+            <div class="card-title" style="margin:0"><i class="fa fa-bell"></i> <span id="notif-page-title">الإشعارات</span></div>
+            <div style="font-size:12px;color:var(--text-muted);margin-top:4px" id="notif-page-subtitle"></div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn-add" id="btn-notif-read-all" data-perm="notifications.read_all" style="background:rgba(0,212,170,0.15);color:var(--accent);border:1px solid rgba(0,212,170,0.3)" onclick="markAllNotificationsRead()"><i class="fa fa-check-double"></i> قراءة الكل</button>
+            <button class="btn-add" id="btn-notif-export" data-perm="notifications.export" style="background:rgba(99,179,237,0.12);color:#63b3ed;border:1px solid rgba(99,179,237,0.25)" onclick="exportNotificationsArchive()"><i class="fa fa-file-archive"></i> تصدير الأرشيف</button>
+            <button class="btn-add" id="btn-clear-activity" data-perm="notifications.clear_all" style="background:rgba(229,62,62,0.12);color:#fc8181;border:1px solid rgba(229,62,62,0.25);display:none" onclick="clearAdminActivityLog()"><i class="fa fa-trash"></i> حذف الكل</button>
+          </div>
+        </div>
+      </div>
+      <div class="notif-list" id="notif-list"></div>
+    </div>
+
+    <!-- COMPANY USERS & PERMISSIONS -->
+    <div class="page" id="page-users-permissions">
+      <div id="company-users-content">
+        <div style="text-align:center;padding:40px;color:var(--text-muted)"><i class="fa fa-spinner fa-spin fa-2x"></i></div>
+      </div>
+    </div>
+
+    <!-- SETTINGS -->
+    <div class="page" id="page-settings">
+      <div class="settings-layout">
+
+        <section class="settings-section">
+          <h2 class="settings-section-title"><i class="fa fa-cog"></i> النظام والمزامنة</h2>
+          <div class="settings-card-grid">
+            <div class="card settings-app-card">
+              <div class="card-title settings-card-head"><i class="fa fa-info-circle"></i> معلومات التطبيق</div>
+              <div class="app-info-rows">
+                <div class="app-info-row">
+                  <span class="app-info-label">المنتج</span>
+                  <span class="app-info-value" id="set-app-product">بصمة KYNO</span>
+                </div>
+                <div class="app-info-row">
+                  <span class="app-info-label">الإصدار</span>
+                  <span class="app-info-value app-version-badge" id="set-app-version">v1.0.0</span>
+                </div>
+                <div class="app-info-row">
+                  <span class="app-info-label">حالة السحابة</span>
+                  <span class="app-info-value cloud-status-inline">
+                    <span class="cloud-status-dot dot-synced" id="set-cloud-status-dot"></span>
+                    <span id="set-cloud-status-text">متزامن مع السحابة</span>
+                  </span>
+                </div>
+                <div class="app-info-row" id="set-last-sync-row">
+                  <span class="app-info-label">آخر مزامنة</span>
+                  <span class="app-info-value" id="set-last-sync-at">—</span>
+                </div>
+              </div>
+              <p class="settings-hint">الإصدار <strong>1.0.0</strong> — الإصدار الأول الرسمي (SemVer). التحديثات: 1.0.x إصلاحات، 1.x.0 ميزات، 2.0.0 تغييرات كبيرة.</p>
+            </div>
+            <div class="card">
+              <div class="card-title settings-card-head"><i class="fa fa-palette"></i> مظهر الواجهة</div>
+          <div class="theme-switch-wrap">
+            <div>
+              <div style="font-weight:700;font-size:14px">وضع العرض</div>
+                  <div class="settings-hint-inline">يُطبَّق على كل الصفحات</div>
+            </div>
+            <div class="theme-switch-btns">
+              <button type="button" class="theme-btn" id="theme-btn-dark" onclick="setTheme('dark')"><i class="fa fa-moon"></i> داكن</button>
+              <button type="button" class="theme-btn" id="theme-btn-light" onclick="setTheme('light')"><i class="fa fa-sun"></i> فاتح</button>
+            </div>
+          </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <h2 class="settings-section-title"><i class="fa fa-building"></i> بيانات الشركة</h2>
+          <div class="settings-card-grid settings-card-grid-1">
+            <div class="card">
+              <div class="card-title settings-card-head"><i class="fa fa-sliders-h"></i> الإعدادات العامة</div>
+              <div class="settings-fields-grid">
+          <div class="setting-group">
+            <label class="setting-label">اسم الشركة</label>
+            <input type="text" class="setting-input" id="set-company-name">
+          </div>
+          <div class="setting-group">
+            <label class="setting-label">العملة</label>
+            <input type="text" class="setting-input" id="set-currency">
+          </div>
+          <div class="setting-group">
+            <label class="setting-label">المنطقة الزمنية</label>
+            <input type="text" class="setting-input" id="set-timezone">
+          </div>
+          <div class="setting-group">
+            <label class="setting-label">أيام الشهر المعتمدة</label>
+            <input type="number" class="setting-input" id="set-month-days" min="20" max="31" step="1" placeholder="30">
+            <div style="font-size:12px;color:var(--text-muted);margin-top:6px;line-height:1.6">أساس حساب المعدل اليومي، الغياب، الإجازات، ونصف الشهر (افتراضي: 30)</div>
+          </div>
+          <div class="setting-group">
+            <label class="setting-label">تنسيق الساعة</label>
+            <select class="setting-input" id="set-clock-format">
+              <option value="12">12 ساعة (AM/PM)</option>
+              <option value="24">24 ساعة</option>
+            </select>
+          </div>
+              </div>
+              <button class="btn-save" data-perm="settings.edit" onclick="saveCompanySettings()"><i class="fa fa-save"></i> حفظ إعدادات الشركة</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <h2 class="settings-section-title"><i class="fa fa-map-marker-alt"></i> الموقع والحضور</h2>
+          <div class="settings-card-grid settings-card-grid-1">
+            <div class="card">
+              <div class="card-title settings-card-head"><i class="fa fa-location-dot"></i> إعدادات GPS</div>
+              <div class="settings-fields-grid settings-fields-grid-2">
+          <div class="setting-group">
+            <label class="setting-label">اسم/وصف موقع الشركة</label>
+            <input type="text" class="setting-input" id="set-gps-name" placeholder="مثال: مقر الشركة الرئيسي - بغداد">
+          </div>
+          <div class="setting-group">
+            <label class="setting-label">موقع الشركة (خط العرض)</label>
+            <input type="text" class="setting-input" id="set-gps-lat" oninput="previewGpsMap()">
+          </div>
+          <div class="setting-group">
+            <label class="setting-label">موقع الشركة (خط الطول)</label>
+            <input type="text" class="setting-input" id="set-gps-lng" oninput="previewGpsMap()">
+          </div>
+          <div class="setting-group">
+            <label class="setting-label">نطاق السماح (متر)</label>
+            <input type="number" class="setting-input" id="set-gps-range" min="10" max="5000" oninput="previewGpsMap()">
+          </div>
+          <div class="gps-map" id="gps-map-preview">
+            <iframe id="gps-map-frame" loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe>
+            <div class="gps-map-overlay">
+              <span id="gps-map-label">موقع الشركة</span>
+              <span id="gps-map-coords" dir="ltr"></span>
+            </div>
+          </div>
+          <div class="gps-actions">
+            <button type="button" class="gps-action-btn" onclick="useMyLocationForCompany()"><i class="fa fa-location-crosshairs"></i> تحديد موقعي الحالي</button>
+            <button type="button" class="gps-action-btn" onclick="openCompanyLocationMap()"><i class="fa fa-map"></i> فتح في الخريطة</button>
+            <button type="button" class="gps-action-btn" onclick="copyCompanyCoords()"><i class="fa fa-copy"></i> نسخ الإحداثيات</button>
+          </div>
+          <button class="btn-save" data-perm="settings.edit" style="margin-top:16px" onclick="saveGpsSettings()"><i class="fa fa-save"></i> حفظ GPS</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <h2 class="settings-section-title"><i class="fa fa-shield-alt"></i> الحماية والأمان</h2>
+          <div class="settings-card-grid">
+            <div class="card">
+              <div class="card-title settings-card-head"><i class="fa fa-lock"></i> سياسات الدخول</div>
+              <div class="settings-toggle-list">
+                <div class="settings-toggle-row">
+                  <span class="setting-label" style="margin:0">تفعيل تتبع الأجهزة</span>
+                  <label class="toggle"><input type="checkbox" id="toggle-track-devices" onchange="appSettings.trackDevices=this.checked;saveData()"><span class="toggle-slider"></span></label>
+                </div>
+                <div class="settings-toggle-row">
+                  <span class="setting-label" style="margin:0">تقييد الدخول بالـ IP (QR)</span>
+                  <label class="toggle"><input type="checkbox" id="toggle-ip-restrict" onchange="appSettings.ipRestrict=this.checked;saveData()"><span class="toggle-slider"></span></label>
+                </div>
+                <div class="settings-toggle-row">
+                  <span class="setting-label" style="margin:0">الإشعارات الأمنية</span>
+                  <label class="toggle"><input type="checkbox" id="toggle-security-alerts" onchange="appSettings.securityAlerts=this.checked;saveData()"><span class="toggle-slider"></span></label>
+                </div>
+                <div class="settings-toggle-row">
+                  <span class="setting-label" style="margin:0">نسخ احتياطي تلقائي</span>
+                  <label class="toggle"><input type="checkbox" id="toggle-auto-backup" onchange="appSettings.autoBackup=this.checked;saveData()"><span class="toggle-slider"></span></label>
+                </div>
+              </div>
+              <div class="security-note" style="margin-top:14px">يرفع السجلات تلقائياً إلى السحابة ويحذّر من الأجهزة غير المسجلة.</div>
+              <button class="btn-save" style="margin-top:14px;background:linear-gradient(135deg,#00d4aa,#00a880)" onclick="enableSecuritySuite()"><i class="fa fa-shield-halved"></i> تفعيل الحماية الكاملة</button>
+            </div>
+            <div class="card" id="company-support-card" style="display:none">
+              <div class="card-title settings-card-head"><i class="fa fa-headset"></i> الدعم الفني</div>
+              <p class="settings-hint">للمساعدة التقنية تواصل مع فريق الدعم.</p>
+              <button type="button" class="subscription-wa-btn company-support-wa-btn" onclick="contactSupportTeam()" style="width:100%;justify-content:center"><i class="fa-brands fa-whatsapp"></i> تواصل مع فريق الدعم</button>
+              <button type="button" class="sa-btn sa-btn-soft" onclick="contactSuperAdmin()" style="width:100%;margin-top:10px;justify-content:center"><i class="fa fa-credit-card"></i> تجديد / تفعيل الاشتراك</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <h2 class="settings-section-title"><i class="fa fa-cloud"></i> السحابة والبيانات</h2>
+          <div class="settings-card-grid">
+            <div class="card">
+              <div class="card-title settings-card-head"><i class="fa fa-database"></i> النسخ الاحتياطي</div>
+              <p class="settings-hint">تصدير أو استعادة JSON — البيانات الأساسية على السحابة.</p>
+              <div class="settings-action-row">
+                <button class="btn-save" onclick="exportBackup()" style="background:linear-gradient(135deg,#3182ce,#2563a8)"><i class="fa fa-download"></i> تصدير</button>
+                <button class="btn-save" onclick="importBackup()" style="background:linear-gradient(135deg,#dd6b20,#c05621)"><i class="fa fa-upload"></i> استعادة</button>
+                <button class="btn-save" onclick="resetAllData()" style="background:linear-gradient(135deg,#e53e3e,#c53030)"><i class="fa fa-trash-alt"></i> مسح</button>
+              </div>
+              <input type="file" id="backup-file-input" accept=".json" style="display:none" onchange="handleBackupFile(event)">
+            </div>
+            <div class="card" id="data-maintenance-card">
+              <div class="card-title settings-card-head"><i class="fa fa-broom"></i> صيانة البيانات</div>
+              <p class="settings-hint">إذا ظهرت بيانات قديمة، حدّث من السيرفر أولاً.</p>
+              <div class="settings-action-row">
+                <button type="button" class="btn-save" data-perm="settings.edit" onclick="forceRefreshTenantData()" style="background:linear-gradient(135deg,#3182ce,#2563a8)"><i class="fa fa-sync-alt"></i> تحديث من السيرفر</button>
+                <button type="button" class="btn-save" data-perm="settings.edit" onclick="strongClearBrowserCache()" style="background:linear-gradient(135deg,#dd6b20,#c05621)"><i class="fa fa-eraser"></i> مسح الكاش</button>
+              </div>
+            </div>
+            <div class="card" id="supabase-card">
+              <div class="card-title settings-card-head"><i class="fa fa-plug"></i> مزامنة يدوية (متقدم) <span id="sb-status-dot" class="cloud-status-dot dot-syncing" style="margin-right:8px"></span></div>
+              <div id="sb-status-msg" class="settings-hint">يتم التحقق من الاتصال...</div>
+              <div class="settings-action-row">
+                <button class="btn-save" onclick="sbPushData()" style="background:linear-gradient(135deg,#00d4aa,#00a880)"><i class="fa fa-cloud-upload-alt"></i> رفع للسحابة</button>
+                <button class="btn-save" onclick="sbPullData()" style="background:linear-gradient(135deg,#2563a8,#1a3a5c)"><i class="fa fa-cloud-download-alt"></i> جلب من السحابة</button>
+              </div>
+              <p class="settings-hint settings-hint-tight"><span data-sb-tenant-hint>المزامنة معزّولة لكل شركة.</span> الرفع التلقائي عند كل حفظ — للطوارئ فقط.</p>
+            </div>
+          </div>
+        </section>
+
+      </div>
+    </div>
+
+    <!-- ===== EMPLOYEE PORTAL PAGES ===== -->
+
+    <div class="page" id="page-emp-home">
+      <div class="emp-portal">
+        <div class="emp-header">
+          <div class="emp-header-avatar" id="emp-portal-avatar">أ</div>
+          <div class="emp-header-info">
+            <h2 id="emp-portal-name">—</h2>
+            <p id="emp-portal-role">—</p>
+            <span class="dept-tag" id="emp-portal-dept"><i class="fa fa-microchip"></i> —</span>
+            <div class="emp-card-info" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+              <span style="font-size:12px;padding:5px 10px;border-radius:999px;background:rgba(99,179,237,0.12);color:#63b3ed"><i class="fa fa-briefcase"></i> <b id="emp-info-role">—</b></span>
+              <span style="font-size:12px;padding:5px 10px;border-radius:999px;background:rgba(104,211,145,0.12);color:#68d391"><i class="fa fa-building"></i> <b id="emp-info-dept">—</b></span>
+              <span style="font-size:12px;padding:5px 10px;border-radius:999px;background:rgba(246,224,94,0.12);color:#f6e05e"><i class="fa fa-phone"></i> <b id="emp-info-phone">—</b></span>
+              <span style="font-size:12px;padding:5px 10px;border-radius:999px;background:rgba(0,212,170,0.12);color:var(--accent)"><i class="fa fa-money-bill"></i> <b id="emp-info-base-salary">0</b></span>
+            </div>
+          </div>
+        </div>
+
+        <div id="emp-work-mode-tags" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px"></div>
+
+        <div class="attendance-btns">
+          <button class="att-btn checkin" onclick="checkIn()">
+            <i class="fa fa-sign-in-alt"></i>
+            تسجيل الحضور
+            <small id="checkin-time">اضغط للتسجيل</small>
+          </button>
+          <button class="att-btn checkout" onclick="checkOut()">
+            <i class="fa fa-sign-out-alt"></i>
+            تسجيل الانصراف
+            <small id="checkout-time">اضغط للتسجيل</small>
+          </button>
+        </div>
+
+        <div class="daily-status-grid">
+          <div class="status-item">
+            <span class="val" id="s-checkin" style="color:#68d391">--:-- --</span>
+            <span class="lbl">وقت الحضور</span>
+          </div>
+          <div class="status-item">
+            <span class="val" id="s-checkout" style="color:#fc8181">--:-- --</span>
+            <span class="lbl">وقت الانصراف</span>
+          </div>
+          <div class="status-item">
+            <span class="val" id="s-hours" style="color:var(--accent)">0:00</span>
+            <span class="lbl">ساعات العمل</span>
+          </div>
+          <div class="status-item">
+            <span class="val" id="s-late" style="color:#f6e05e">0 د</span>
+            <span class="lbl">التأخير</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title" style="margin-bottom:16px"><i class="fa fa-calendar-week"></i> سجل هذا الأسبوع</div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>اليوم</th>
+                  <th>الحضور والانصراف</th>
+                  <th>ساعات العمل</th>
+                  <th>الحالة</th>
+                </tr>
+              </thead>
+              <tbody id="emp-week-table"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- قسم الإجازات والإشعارات للموظف -->
+        <div class="card" style="margin-top:16px">
+          <div class="card-header" style="padding-bottom:8px">
+            <div class="card-title" style="font-size:14px"><i class="fa fa-calendar-alt" style="color:#f6ad55"></i> إجازاتي</div>
+          </div>
+          <div id="emp-leaves-list" style="padding:8px"></div>
+        </div>
+
+        <div class="card" style="margin-top:12px">
+          <div class="card-header" style="padding-bottom:8px">
+            <div class="card-title" style="font-size:14px">
+              <i class="fa fa-bell" style="color:#63b3ed"></i> إشعاراتي المالية والإجازات
+              <span id="emp-leave-notif-badge" class="nav-badge" style="display:none;margin-right:6px;font-size:10px"></span>
+            </div>
+          </div>
+          <div id="emp-leave-notifs" style="padding:8px"></div>
+        </div>
+
+      </div>
+    </div>
+
+    <div class="page" id="page-emp-salary">
+      <div class="emp-portal">
+        <div class="salary-summary">
+          <div>
+            <div style="font-size:13px;color:var(--text-muted);margin-bottom:8px" id="emp-salary-label">صافي الراتب — —</div>
+            <div class="salary-amount" id="emp-salary-net">0</div>
+            <div style="font-size:14px;color:var(--text-secondary);margin-top:4px">دينار عراقي</div>
+          </div>
+          <div style="text-align:left">
+            <button class="btn-save" onclick="downloadSalary()">
+              <i class="fa fa-download"></i> تحميل كشف الراتب
+            </button>
+          </div>
+        </div>
+        <div class="salary-details-grid">
+          <div class="stat-card green">
+            <div class="stat-label">الراتب الأساسي</div>
+            <div class="stat-value green" style="font-size:24px" id="emp-salary-base">0</div>
+            <div class="stat-sub">دينار عراقي</div>
+          </div>
+          <div class="stat-card blue">
+            <div class="stat-label">الساعات الإضافية</div>
+            <div class="stat-value blue" style="font-size:24px" id="emp-salary-ot">0</div>
+            <div class="stat-sub" id="emp-salary-ot-sub">—</div>
+          </div>
+          <div class="stat-card red">
+            <div class="stat-label">خصومات مالية</div>
+            <div class="stat-value red" style="font-size:24px" id="emp-salary-deduct">0</div>
+            <div class="stat-sub" id="emp-salary-deduct-sub">—</div>
+          </div>
+        </div>
+        <div id="emp-biweekly-bar" class="card" style="display:none;padding:16px;margin-bottom:12px"></div>
+        <div class="card" style="margin-bottom:12px">
+          <div class="card-title" style="margin-bottom:12px"><i class="fa fa-list-check"></i> تفاصيل الراتب الحالية</div>
+          <div class="daily-status-grid" style="margin-bottom:0">
+            <div class="status-item">
+              <span class="val" id="emp-salary-bonuses" style="color:#68d391">0</span>
+              <span class="lbl">المكافآت</span>
+            </div>
+            <div class="status-item">
+              <span class="val" id="emp-salary-loans" style="color:#f6ad55">0</span>
+              <span class="lbl">السلف</span>
+            </div>
+            <div class="status-item">
+              <span class="val" id="emp-salary-manual-deduct" style="color:#fc8181">0</span>
+              <span class="lbl">خصومات مالية</span>
+            </div>
+            <div class="status-item">
+              <span class="val" id="emp-salary-leaves" style="color:#63b3ed">0</span>
+              <span class="lbl">الإجازات/الغياب</span>
+            </div>
+          </div>
+          <div id="emp-salary-breakdown" style="margin-top:12px;font-size:13px;color:var(--text-secondary);line-height:1.8"></div>
+        </div>
+        <div class="card">
+          <div class="card-title" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between">
+            <span><i class="fa fa-history"></i> سجل الرواتب السابقة</span>
+            <div style="display:flex;gap:8px;align-items:center">
+              <button class="btn-sm btn-primary" id="emp-salary-add-btn" style="display:none" onclick="addSalaryRecord()"><i class="fa fa-plus"></i> إضافة سجل</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>الشهر</th><th>الراتب الأساسي</th><th>الإضافي</th><th>الخصومات</th><th>الصافي</th><th>الحالة</th><th id="emp-salary-actions-th" style="display:none">إجراءات</th></tr>
+              </thead>
+              <tbody id="emp-salary-history"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="page" id="page-emp-profile">
+      <div class="emp-portal">
+        <div class="card" style="max-width:500px">
+          <div class="card-title" style="margin-bottom:24px"><i class="fa fa-user-circle"></i> الملف الشخصي</div>
+          <div style="text-align:center;margin-bottom:24px">
+            <div id="emp-profile-avatar-wrap" style="width:110px;height:110px;border-radius:24px;background:linear-gradient(135deg,var(--accent),var(--primary-light));display:flex;align-items:center;justify-content:center;font-size:42px;font-weight:900;margin:0 auto 12px;box-shadow:0 8px 24px var(--accent-glow);position:relative;overflow:hidden;cursor:pointer" onclick="changeEmpAvatar()">
+              <span id="emp-profile-avatar">أ</span>
+              <img id="emp-profile-avatar-img" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:none;border-radius:24px">
+              <div style="position:absolute;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;opacity:0;transition:opacity 0.3s" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0"><i class="fa fa-camera" style="color:white;font-size:24px"></i></div>
+            </div>
+            <input type="file" id="emp-avatar-input" accept="image/*" capture="user" style="display:none" onchange="handleEmpAvatarUpload(event)">
+            <button class="btn-sm btn-primary" style="width:auto;padding:8px 20px" onclick="changeEmpAvatar()">📷 تغيير الصورة</button>
+          </div>
+          <div class="setting-group"><label class="setting-label">الاسم الكامل</label><input type="text" class="setting-input" id="emp-profile-name" readonly></div>
+          <div class="setting-group"><label class="setting-label">رقم الهاتف</label><input type="text" class="setting-input" id="emp-profile-phone" dir="ltr" style="text-align:right" readonly></div>
+          <div class="setting-group"><label class="setting-label">القسم</label><input type="text" class="setting-input" id="emp-profile-dept" readonly></div>
+          <div class="setting-group"><label class="setting-label">الوظيفة</label><input type="text" class="setting-input" id="emp-profile-role" readonly></div>
+          <div class="setting-group"><label class="setting-label">وقت الحضور</label><input type="text" class="setting-input" id="emp-profile-checkin" readonly></div>
+          <div class="setting-group"><label class="setting-label">وقت الانصراف</label><input type="text" class="setting-input" id="emp-profile-checkout" readonly></div>
+          <div id="emp-profile-admin-lock" style="margin-bottom:16px">
+            <button class="btn-sm btn-primary" style="width:100%;padding:12px;font-size:14px" onclick="unlockProfileAdmin()"><i class="fa fa-lock"></i> دخول مسؤول للتعديل</button>
+          </div>
+          <div id="emp-profile-admin-bar" style="display:none;margin-bottom:16px;padding:12px;background:rgba(244,161,0,0.1);border:1px solid rgba(244,161,0,0.3);border-radius:10px;text-align:center">
+            <div style="color:#f6e05e;font-weight:700;margin-bottom:4px"><i class="fa fa-unlock"></i> وضع المسؤول — جميع الحقول قابلة للتعديل</div>
+            <button class="btn-sm btn-danger" style="margin-top:6px" onclick="lockProfileAdmin()"><i class="fa fa-lock"></i> إعادة القفل</button>
+          </div>
+          <button class="btn-save" id="emp-profile-save-btn" onclick="saveEmpProfile()">💾 حفظ التعديلات</button>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+</div>
+
+<!-- Supabase SDK + tenant integration (JWT / RLS) — قبل سكربتات التطبيق -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" onerror="console.warn('مكتبة الاتصال لم تُحمّل')"></script>
+<script src="supabase_integration.js?v=20260618" onerror="console.warn('ملفات الاتصال غير متوفرة')"></script>
+<script src="js/kyno/integration.js"></script>
+<script src="js/app/state.js"></script>
+<script src="js/app/sync-state.js?v=20260618"></script>
+<script src="js/core/dom.js"></script>
+<script type="module" src="js/app/entry.js"></script>
+<script src="js/leaves/ui.js"></script>
+<script src="js/app/main.js?v=20260618"></script>
+<script src="js/auth/admin-session.js?v=20260618"></script>
+<script src="js/auth/login.js?v=20260618"></script>
+
+<!-- BARCODE SCAN MODAL -->
+<div id="barcode-modal">
+  <div class="barcode-modal-box">
+    <h3><i class="fa fa-qrcode"></i> تسجيل الجهاز</h3>
+    <p id="barcode-modal-desc">امسح QR بكاميرا الهاتف لربط الجهاز تلقائياً</p>
+    <div style="margin-bottom:12px">
+      <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:6px">رابط أو token التسجيل</label>
+      <input type="text" id="barcode-scan-input" placeholder="REG_x8aK29LmPq أو رابط QR" autocomplete="off">
+    </div>
+    <div style="display:none;align-items:center;gap:8px;margin-bottom:12px">
+      <div style="flex:1;height:1px;background:var(--border)"></div>
+      <span style="font-size:11px;color:var(--text-muted)">أو أدخل PIN</span>
+      <div style="flex:1;height:1px;background:var(--border)"></div>
+    </div>
+    <div style="margin-bottom:12px;display:none">
+      <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:6px">رمز PIN (6 أرقام)</label>
+      <input type="text" id="barcode-pin-input" placeholder="أدخل 6 أرقام" maxlength="6" dir="ltr" style="width:100%;padding:14px;border-radius:12px;border:2px solid #f6e05e;background:rgba(0,0,0,0.2);color:#f6e05e;font-size:18px;text-align:center;letter-spacing:6px;font-weight:700" autocomplete="off">
+    </div>
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">بصمة هذا الجهاز: <span id="barcode-fp-display" style="color:#68d391;direction:ltr"></span></div>
+    <div class="scan-result-ip" id="scan-result-ip"></div>
+    <button type="button" class="btn-modal-close" onclick="closeBarcodeModal()">إغلاق</button>
+  </div>
+</div>
+
+
+<script src="js/app/ui-extra.js?v=20260618"></script>
+<script src="js/app/ui-bindings.js?v=20260618"></script>
+
+</body>
+</html>
