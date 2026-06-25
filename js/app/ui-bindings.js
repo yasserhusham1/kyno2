@@ -29,7 +29,7 @@
   function bindTopbarClicks() {
     if (document.documentElement.dataset.topbarBound === '1') return;
     document.documentElement.dataset.topbarBound = '1';
-    document.addEventListener('click', function (e) {
+    safeAddEvent(document, 'click', function (e) {
       var notif = e.target && e.target.closest ? e.target.closest('.topbar-notif, [data-goto-page]') : null;
       if (!notif) return;
       var pageId = notif.getAttribute('data-goto-page') || 'notifications';

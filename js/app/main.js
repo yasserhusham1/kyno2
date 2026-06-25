@@ -1,4 +1,5 @@
-// ======= DATA =======
+// Soft-failure runtime: safeRun, safeAddEvent, safeRpc, applySafeMode (js/core/safe-runtime.js)
+
 const DEFAULT_EMPLOYEES = [];
 const DEFAULT_ATT_DATA = [];
 const STORAGE_KEY = 'attendance_system_data';
@@ -453,21 +454,18 @@ function schedulePersistNotifications() {
 }
 
 function safeActiveCompanyId(emp) {
-  try {
-    return getActiveCompanyId(emp);
-  } catch (e) {
-    if (e && e.message === 'NO_COMPANY_CONTEXT') return null;
-    throw e;
-  }
+  return getActiveCompanyId(emp);
 }
 
 function getActiveCompanyId(emp) {
   if (typeof resolveActiveCompanyId !== 'function') {
-    throw new Error('NO_COMPANY_CONTEXT');
+    console.error('SOFT ERROR:', 'NO_COMPANY_CONTEXT');
+    return null;
   }
   var cid = resolveActiveCompanyId(emp);
   if (!cid || cid <= 0) {
-    throw new Error('NO_COMPANY_CONTEXT');
+    console.error('SOFT ERROR:', 'NO_COMPANY_CONTEXT');
+    return null;
   }
   return cid;
 }
@@ -2105,7 +2103,7 @@ function showPhoneRegistrationPage() {
   document.body.appendChild(overlay);
   setTimeout(() => {
     const inp = document.getElementById('phone-reg-code');
-    if (inp) { inp.focus(); inp.addEventListener('keydown', e => { if (e.key === 'Enter') doPhoneRegistration(); }); }
+    if (inp) { inp.focus(); safeAddEvent(inp, 'keydown', function (e) { if (e.key === 'Enter') doPhoneRegistration(); }); }
   }, 200);
 }
 
@@ -3564,34 +3562,63 @@ async function runAutoLoginRestore() {
   }
 }
 
-document.addEventListener('DOMContentLoaded', async () => {
-  initTheme();
-  const scanInp = document.getElementById('barcode-scan-input');
-  if (scanInp) scanInp.addEventListener('keydown', e => {
+function initAuth() {
+  if (typeof initSupabase === 'function') initSupabase();
+  if (typeof probeSupabaseProxyOnce === 'function') {
+    probeSupabaseProxyOnce().catch(function (e) { console.warn('initAuth probe:', e); });
+  }
+}
+
+function initSession() {
+  /* session.js registers BasmaSession at parse time */
+}
+
+function initPermissions() {
+  if (typeof applyPermissionUi === 'function') applyPermissionUi(document);
+}
+
+function initRPC() {
+  if (typeof BasmaRpcMode !== 'undefined') { /* flags loaded at parse time */ }
+}
+
+function initCloudSync() {
+  if (typeof BasmaCloud !== 'undefined' && BasmaCloud.initCloudSync && currentUser) {
+    BasmaCloud.initCloudSync();
+  }
+}
+
+function initUIBindings() {
+  if (typeof KYNO_UI_BINDINGS !== 'undefined' && KYNO_UI_BINDINGS.bindTopbarClicks) {
+    KYNO_UI_BINDINGS.bindTopbarClicks();
+  }
+  if (typeof bindSidebarNavClicks === 'function') bindSidebarNavClicks();
+  if (typeof bindSaActionClicks === 'function') bindSaActionClicks();
+  if (typeof installShowPageBridge === 'function') installShowPageBridge();
+}
+
+function bindBarcodeInputs() {
+  var scanInp = document.getElementById('barcode-scan-input');
+  safeAddEvent(scanInp, 'keydown', function (e) {
     if (e.key === 'Enter') {
       e.preventDefault();
-      const val = scanInp.value.trim();
+      var val = scanInp.value.trim();
       if (!val) return;
-      // Check if it's a 6-digit PIN
-      if (/^\d{6}$/.test(val)) {
-        handlePinEntry(val);
-      } else {
-        handleBarcodeScanned(val);
-      }
+      if (/^\d{6}$/.test(val)) handlePinEntry(val);
+      else handleBarcodeScanned(val);
     }
   });
-  const pinInp = document.getElementById('barcode-pin-input');
-  if (pinInp) pinInp.addEventListener('keydown', e => {
+  var pinInp = document.getElementById('barcode-pin-input');
+  safeAddEvent(pinInp, 'keydown', function (e) {
     if (e.key === 'Enter') {
       e.preventDefault();
-      const val = pinInp.value.trim();
+      var val = pinInp.value.trim();
       if (val) handlePinEntry(val);
     }
   });
-  const registrationHandled = await checkQrRegisterFromUrl();
-  if (!registrationHandled) await runAutoLoginRestore();
+}
 
-  document.addEventListener('visibilitychange', function () {
+function bindVisibilitySync() {
+  safeAddEvent(document, 'visibilitychange', function () {
     if (document.visibilityState !== 'visible') return;
     if (currentUser === 'emp' && window.loggedInEmpId) {
       var tasks = [];
@@ -3637,6 +3664,37 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
     }
   });
+}
+
+function bootstrapAppShell() {
+  safeRun(function () { initTheme(); }, 'theme');
+  safeRun(function () { initAuth(); }, 'auth');
+  safeRun(function () { initSession(); }, 'session');
+  safeRun(function () { initPermissions(); }, 'permissions');
+  safeRun(function () { initRPC(); }, 'rpc');
+  safeRun(function () { initCloudSync(); }, 'cloud');
+  safeRun(function () { initUIBindings(); }, 'ui');
+  safeRun(function () { bindBarcodeInputs(); }, 'buttons');
+  safeRun(function () { bindVisibilitySync(); }, 'visibility');
+  safeRun(function () {
+    var registrationHandledPromise = checkQrRegisterFromUrl();
+    if (registrationHandledPromise && typeof registrationHandledPromise.then === 'function') {
+      registrationHandledPromise.then(function (registrationHandled) {
+        if (!registrationHandled) return runAutoLoginRestore();
+      }).catch(function (e) {
+        console.error('[MODULE FAILED] auto-login', e);
+        window.__APP_SAFE_MODE = true;
+        if (typeof applySafeMode === 'function') applySafeMode();
+      }).finally(function () {
+        if (typeof applySafeMode === 'function') applySafeMode();
+      });
+    }
+  }, 'auto-login');
+  if (typeof applySafeMode === 'function') applySafeMode();
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+  bootstrapAppShell();
 });
 
 window.addEventListener('load', function() {
@@ -3788,16 +3846,19 @@ function bindPermissionCards() {
     if (!card) return;
     var sync = function () { card.classList.toggle('active', input.checked); };
     sync();
-    input.addEventListener('change', sync);
+    safeAddEvent(input, 'change', sync);
   });
 }
 
 function launchApp() {
-  if (window.__basmaModulesReady) {
-    _runLaunchApp();
-    return;
-  }
-  window.addEventListener('basma:modules-ready', _runLaunchApp, { once: true });
+  safeRun(function () {
+    if (window.__basmaModulesReady) {
+      _runLaunchApp();
+      return;
+    }
+    window.addEventListener('basma:modules-ready', _runLaunchApp, { once: true });
+  }, 'launch-app');
+  if (typeof applySafeMode === 'function') applySafeMode();
 }
 
 function _runLaunchApp() {
@@ -4845,9 +4906,9 @@ function addAttRecord() {
         calcPreview();
       };
 
-      document.getElementById('att-from-date')?.addEventListener('change', calcPreview);
-      document.getElementById('att-to-date')?.addEventListener('change', calcPreview);
-      document.getElementById('att-emp-id')?.addEventListener('change', calcPreview);
+      safeAddEvent(document.getElementById('att-from-date'), 'change', calcPreview);
+      safeAddEvent(document.getElementById('att-to-date'), 'change', calcPreview);
+      safeAddEvent(document.getElementById('att-emp-id'), 'change', calcPreview);
     },
     preConfirm: () => {
       const empId = parseInt(document.getElementById('att-emp-id').value, 10);
@@ -5184,7 +5245,8 @@ function saveCanvasAsPdf(canvas, filename, orientation) {
     return BasmaPdf.saveCanvasAsPdf(canvas, filename, orientation);
   }
   if (typeof jspdf === 'undefined' || !jspdf.jsPDF) {
-    throw new Error('مكتبة jsPDF غير جاهزة');
+    console.error('SOFT ERROR:', 'مكتبة jsPDF غير جاهزة');
+    return false;
   }
   var safeName = filename || ('report_' + Date.now() + '.pdf');
   var pdf = new jspdf.jsPDF({
@@ -5215,11 +5277,13 @@ function saveCanvasAsPdf(canvas, filename, orientation) {
   }
 
   pdf.save(safeName);
+  return true;
 }
 
 async function captureReportCanvas(reportHtml) {
   if (typeof html2canvas === 'undefined') {
-    throw new Error('مكتبة html2canvas غير جاهزة');
+    console.error('SOFT ERROR:', 'مكتبة html2canvas غير جاهزة');
+    return null;
   }
 
   var iframe = document.createElement('iframe');
@@ -5260,7 +5324,8 @@ async function captureReportCanvas(reportHtml) {
     });
 
     if (!canvasHasContent(canvas)) {
-      throw new Error('تعذر التقاط محتوى التقرير. جرّب المعاينة ثم احفظ من المتصفح.');
+      console.error('SOFT ERROR:', 'تعذر التقاط محتوى التقرير. جرّب المعاينة ثم احفظ من المتصفح.');
+      return null;
     }
 
     return canvas;
@@ -6353,7 +6418,7 @@ function editPaidSalaryRecord(employeeId, monthIso) {
         dateEl.disabled = !isPaid;
         dateEl.style.opacity = isPaid ? '1' : '0.6';
       }
-      if (statusEl) statusEl.addEventListener('change', syncPaidDateField);
+      if (statusEl) safeAddEvent(statusEl, 'change', syncPaidDateField);
       syncPaidDateField();
     },
     preConfirm: function () {
@@ -7729,7 +7794,7 @@ function renderEmployeeFinanceNotificationsRail() {
     '</div>';
   }).join('');
   rail.querySelectorAll('[data-emp-notif-id]').forEach(function (btn) {
-    btn.addEventListener('click', function (ev) {
+    safeAddEvent(btn, 'click', function (ev) {
       ev.preventDefault();
       ev.stopPropagation();
       dismissEmployeeNotification(btn.getAttribute('data-emp-notif-id') || '');
@@ -8593,7 +8658,7 @@ function openEmpAvatarCropper(file, emp) {
           state.y = (ch - h) / 2;
           applyAvatarCropTransform(img, state, zoom);
         };
-        zoom.addEventListener('input', function () {
+        safeAddEvent(zoom, 'input', function () {
           const cw = wrap.clientWidth;
           const ch = wrap.clientHeight;
           const oldW = parseFloat(img.style.width) || img.offsetWidth;
@@ -8634,13 +8699,14 @@ function openEmpAvatarCropper(file, emp) {
           state.dragging = false;
           img.style.cursor = 'grab';
         };
-        img.addEventListener('mousedown', onDown);
-        img.addEventListener('touchstart', onDown, { passive: true });
-        window.addEventListener('mousemove', onMove);
-        window.addEventListener('touchmove', onMove, { passive: false });
-        window.addEventListener('mouseup', onUp);
-        window.addEventListener('touchend', onUp);
-        Swal.getPopup()?.addEventListener('close', function () {
+        safeAddEvent(img, 'mousedown', onDown);
+        safeAddEvent(img, 'touchstart', onDown, { passive: true });
+        safeAddEvent(window, 'mousemove', onMove);
+        safeAddEvent(window, 'touchmove', onMove, { passive: false });
+        safeAddEvent(window, 'mouseup', onUp);
+        safeAddEvent(window, 'touchend', onUp);
+        var popup = Swal.getPopup();
+        if (popup) safeAddEvent(popup, 'close', function () {
           window.removeEventListener('mousemove', onMove);
           window.removeEventListener('touchmove', onMove);
           window.removeEventListener('mouseup', onUp);
@@ -9367,6 +9433,9 @@ async function autoSyncEmployeeToSupabase(emp, retries) {
       return { ok: false, reason: 'تعذّر الاتصال بالسحابة — تحقق من الإنترنت أو انتظر ثوانٍ ثم أعد المحاولة' };
     }
     emp.company_id = getActiveCompanyId(emp);
+    if (!emp.company_id) {
+      return { ok: false, reason: 'سياق الشركة غير متوفر — أعد تسجيل الدخول' };
+    }
     if (emp.dept && typeof sb_ensureDepartment === 'function') {
       var deptReady = await sb_ensureDepartment(emp.dept);
       if (!deptReady) {
@@ -9530,7 +9599,11 @@ async function openEmpForm(mode, id) {
           if (pulls >= 20) clearInterval(pullTimer);
         }, 3000);
       }
-      setTimeout(() => { onSalaryTypeChange(); syncEmpOptionCards(); onEmpRoleChange(); const dr = document.getElementById('emp-daily-rate'); if (dr) dr.addEventListener('input', function() { this.dataset.manual = '1'; }); }, 100);
+      setTimeout(function () {
+        onSalaryTypeChange(); syncEmpOptionCards(); onEmpRoleChange();
+        var dr = document.getElementById('emp-daily-rate');
+        if (dr) safeAddEvent(dr, 'input', function () { this.dataset.manual = '1'; });
+      }, 100);
     }
   }).then(async r => {
     if (!r.isConfirmed || !r.value) return;
@@ -9550,10 +9623,8 @@ async function openEmpForm(mode, id) {
       employees = (employees || []).filter(function (x) { return !x || Number(x.id) !== newId; });
       attData = (attData || []).filter(function (x) { return !x || Number(x.empId) !== newId; });
       if (typeof clearSalaryCacheForEmployee === 'function') clearSalaryCacheForEmployee(newId);
-      let companyId;
-      try {
-        companyId = getActiveCompanyId(null);
-      } catch (e) {
+      companyId = getActiveCompanyId(null);
+      if (!companyId) {
         resumeRemoteSync(0);
         nextEmpId--;
         Swal.fire({
@@ -9954,11 +10025,11 @@ function addSalaryRecord() {
       };
 
       setTimeout(calcSummary, 200);
-      document.getElementById('sal-rec-from')?.addEventListener('change', calcSummary);
-      document.getElementById('sal-rec-to')?.addEventListener('change', calcSummary);
+      safeAddEvent(document.getElementById('sal-rec-from'), 'change', calcSummary);
+      safeAddEvent(document.getElementById('sal-rec-to'), 'change', calcSummary);
       // Mark fields as manual if user edits them
-      document.getElementById('sal-rec-deduct')?.addEventListener('input', function() { this.dataset.manual = '1'; });
-      document.getElementById('sal-rec-ot')?.addEventListener('input', function() { this.dataset.manual = '1'; });
+      safeAddEvent(document.getElementById('sal-rec-deduct'), 'input', function () { this.dataset.manual = '1'; });
+      safeAddEvent(document.getElementById('sal-rec-ot'), 'input', function () { this.dataset.manual = '1'; });
     },
     preConfirm: () => {
       const month = document.getElementById('sal-rec-month')?.value.trim();
@@ -10167,7 +10238,11 @@ async function forceRefreshTenantData() {
       await refreshNextEmpIdBeforeAdd();
     }
     if (typeof refreshAll === 'function') refreshAll();
-    if (ok === false) throw new Error('تعذّر الاتصال بالسحابة');
+    if (ok === false) {
+      console.error('SOFT ERROR:', 'تعذّر الاتصال بالسحابة');
+      Swal.fire({ icon: 'error', title: 'فشل التحديث', text: 'تعذّر الاتصال بالسحابة', ...swalTheme() });
+      return;
+    }
     Swal.fire({
       icon: 'success',
       title: 'تم تحديث البيانات',
@@ -10248,7 +10323,12 @@ async function sbCheckConnection() {
   }
   try {
     const { error } = await _sbClient.from('app_settings').select('key').limit(1);
-    if (error) throw error;
+    if (error) {
+      console.error('SOFT ERROR:', error.message || error);
+      dot.style.background = '#fc8181';
+      msg.textContent = '❌ تعذّر الاتصال: ' + sanitizeCloudUserText(error.message || 'خطأ غير معروف') + ' — تحقق من الإنترنت وقاعدة البيانات';
+      return;
+    }
     dot.style.background = '#68d391';
     msg.textContent = '✅ متصل بالسحابة';
   } catch(e) {

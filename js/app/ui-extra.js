@@ -33,7 +33,7 @@ function installShowPageBridge() {
 function bindSidebarNavClicks() {
   if (document.documentElement.dataset.sidebarNavBound === '1') return;
   document.documentElement.dataset.sidebarNavBound = '1';
-  document.addEventListener('click', function (e) {
+  safeAddEvent(document, 'click', function (e) {
     var item = e.target && e.target.closest
       ? e.target.closest('#sidebar-nav .nav-item[data-page]')
       : null;
@@ -48,7 +48,7 @@ function bindSidebarNavClicks() {
 function bindSaActionClicks() {
   if (document.documentElement.dataset.saActionBound === '1') return;
   document.documentElement.dataset.saActionBound = '1';
-  document.addEventListener('click', function (e) {
+  safeAddEvent(document, 'click', function (e) {
     var btn = e.target && e.target.closest ? e.target.closest('[data-sa-action]') : null;
     if (!btn) return;
     var action = btn.getAttribute('data-sa-action');
@@ -70,16 +70,16 @@ if (typeof window !== 'undefined') {
 
 // ======= NETLIFY / VERCEL FIX =======
 // Ensure all relative paths work
-window.addEventListener('error', function(e) {
+safeAddEvent(window, 'error', function(e) {
   console.warn('Resource error (may be non-critical):', e.target?.src || e.target?.href || e.message);
 }, true);
 
 // ======= SWAL RESPONSIVE FIX =======
 document.addEventListener('DOMContentLoaded', function() {
-  bindSidebarNavClicks();
-  if (typeof bindSaActionClicks === 'function') bindSaActionClicks();
-  if (typeof installShowPageBridge === 'function') installShowPageBridge();
-  window.addEventListener('resize', function () {
+  safeRun(function () { bindSidebarNavClicks(); }, 'sidebar-nav');
+  safeRun(function () { if (typeof bindSaActionClicks === 'function') bindSaActionClicks(); }, 'sa-actions');
+  safeRun(function () { if (typeof installShowPageBridge === 'function') installShowPageBridge(); }, 'show-page-bridge');
+  safeAddEvent(window, 'resize', function () {
     if (window.innerWidth > 768 && typeof closeSidebar === 'function') closeSidebar();
   });
   // Ensure SweetAlert popups are responsive
@@ -107,14 +107,14 @@ document.addEventListener('DOMContentLoaded', function() {
   }
 
   // Handle keyboard enter on login form  
-  document.getElementById('password')?.addEventListener('keydown', function(e) {
+  safeAddEvent(document.getElementById('password'), 'keydown', function(e) {
     if (e.key === 'Enter') doLogin('admin');
   });
-  document.getElementById('username')?.addEventListener('keydown', function(e) {
+  safeAddEvent(document.getElementById('username'), 'keydown', function(e) {
     if (e.key === 'Enter') doLogin('admin');
   });
 
-  document.addEventListener('keydown', function (e) {
+  safeAddEvent(document, 'keydown', function (e) {
     if (e.key === 'Escape' && typeof clearStaleUiBlockers === 'function') {
       clearStaleUiBlockers();
     }
@@ -143,7 +143,7 @@ function safeSetStorage(key, val) {
 }
 
 // ======= GLOBAL ERROR HANDLER =======
-window.addEventListener('unhandledrejection', function(e) {
+safeAddEvent(window, 'unhandledrejection', function(e) {
   console.warn('Unhandled promise rejection:', e.reason);
   if (e.reason && e.reason.message) {
     console.error('Error details:', e.reason.message);

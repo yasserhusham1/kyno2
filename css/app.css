@@ -76,6 +76,20 @@ body::before {
   z-index: 0;
 }
 
+/* ========== SAFE MODE (soft-failure fallback) ========== */
+body.safe-mode .main-content,
+body.safe-mode .sidebar,
+body.safe-mode button,
+body.safe-mode .nav-item,
+body.safe-mode .sa-action-card {
+  pointer-events: auto !important;
+}
+body.safe-mode button:disabled,
+body.safe-mode .btn-login:disabled {
+  opacity: 1 !important;
+  cursor: pointer !important;
+}
+
 /* ========== LOGIN PAGE ========== */
 #login-page {
   position: fixed;
