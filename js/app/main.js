@@ -198,8 +198,10 @@ function buildAppSettingsPayload() {
     jobs_json: JSON.stringify(appSettings.jobs || []),
     salary_deleted_map: JSON.stringify(appSettings.salaryDeletedMap || {}),
     finance_items: JSON.stringify(appSettings.financeItems || []),
+    broadcast_notices: JSON.stringify(appSettings.broadcastNotices || []),
     activity_log: JSON.stringify(appSettings.activityLog || []),
     employee_notifications: JSON.stringify(appSettings.employeeNotifications || []),
+    official_closures_json: JSON.stringify(normalizeOfficialClosures(appSettings.officialClosures || [])),
     gps_name: appSettings.gpsName || '',
     gps_lat: appSettings.gpsLat || '',
     gps_lng: appSettings.gpsLng || '',
@@ -282,6 +284,9 @@ async function mergeRemoteSharedSettingsBeforeSave() {
   if (typeof mergeRemoteOrgListsBeforeSave === 'function') {
     await mergeRemoteOrgListsBeforeSave();
   }
+  if (typeof mergeRemoteFinanceBeforeCloudSave === 'function') {
+    await mergeRemoteFinanceBeforeCloudSave();
+  }
   if (typeof shouldPreferLocalAppSettings === 'function' && shouldPreferLocalAppSettings()) return;
   if (typeof sb_getSettings !== 'function') return;
   try {
@@ -309,7 +314,11 @@ async function persistAppSettingsNow() {
   }
   try {
     await mergeRemoteSharedSettingsBeforeSave();
-    var ok = await sb_saveSettings(buildAppSettingsPayload());
+    var payload = buildAppSettingsPayload();
+    if (typeof guardFinanceItemsCloudWrite === 'function') {
+      payload = await guardFinanceItemsCloudWrite(payload);
+    }
+    var ok = await sb_saveSettings(payload);
     if (ok) window.__basmaLocalSettingsAt = Date.now();
     return { ok: !!ok, reason: ok ? '' : 'settings_save_failed' };
   } catch (e) {
@@ -345,7 +354,6 @@ async function persistNotificationsNow(options) {
   options = options || {};
   ensureNotifStores();
   if (!options.noPause) pauseRemoteSync(options.pauseMs || 12000);
-  window.__basmaLocalSettingsAt = Date.now();
   window.__basmaLocalNotifAt = Date.now();
   var authOk = false;
   try {
@@ -543,6 +551,89 @@ function getEmpLateDeductRate(emp) {
   return n >= 0 && !isNaN(n) ? n : DEFAULT_LATE_DEDUCT_RATE;
 }
 
+function getEmpOfficialWorkMinutes(emp) {
+  var ci = timeToMinutes((emp && emp.checkIn) || (appSettings && appSettings.workStart) || '08:00');
+  var co = timeToMinutes((emp && emp.checkOut) || (appSettings && appSettings.workEnd) || '17:00');
+  if (co <= ci) return Math.max(60, (24 * 60 - ci) + co);
+  return Math.max(60, co - ci);
+}
+
+function getBillableLateMinutes(emp, lateMin) {
+  var m = parseInt(lateMin, 10) || 0;
+  if (m <= 0) return 0;
+  // Late deduction is prorated by exact minutes (1..n), no legacy threshold cut.
+  return m;
+}
+
+function calcAttendanceShortMinutes(emp, rec) {
+  if (!emp || !rec || emp.openHours || (emp.salaryType || 'monthly') === 'commission') return 0;
+  if (!rec.ci || rec.ci === '—' || !rec.co || rec.co === '—') return 0;
+  var officialCi = timeToMinutes(emp.checkIn || (appSettings && appSettings.workStart) || '08:00');
+  var officialCo = timeToMinutes(emp.checkOut || (appSettings && appSettings.workEnd) || '17:00');
+  var actualCi = timeToMinutes(rec.ci);
+  var actualCo = timeToMinutes(rec.co);
+  var lateIn = Math.max(0, actualCi - officialCi);
+  var earlyOut = Math.max(0, officialCo - actualCo);
+  return getBillableLateMinutes(emp, lateIn + earlyOut);
+}
+
+function calcLateDeductAmount(emp, totalLateMin, dailyRate) {
+  if (!emp || emp.openHours || (emp.salaryType || 'monthly') === 'commission') return 0;
+  var mins = parseInt(totalLateMin, 10) || 0;
+  if (mins <= 0) return 0;
+  var dr = dailyRate > 0 ? dailyRate : (typeof getEmpDailyRate === 'function' ? getEmpDailyRate(emp) : 0);
+  if (dr <= 0) return 0;
+  var workMins = getEmpOfficialWorkMinutes(emp);
+  return Math.round(mins * (dr / workMins));
+}
+
+function countWorkDaysBetween(startDate, endDate) {
+  if (!startDate || !endDate || endDate < startDate) return 0;
+  var n = 0;
+  var d = new Date(startDate.getTime());
+  d.setHours(12, 0, 0, 0);
+  var end = new Date(endDate.getTime());
+  end.setHours(12, 0, 0, 0);
+  while (d <= end) {
+    n++;
+    d.setDate(d.getDate() + 1);
+  }
+  return n;
+}
+
+function salaryPeriodWorkDaysElapsed(type) {
+  var period = salaryPeriodInfo(type || 'monthly');
+  var today = new Date();
+  var yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1, 12, 0, 0);
+  var end = yesterday < period.end ? yesterday : period.end;
+  if (end < period.start) return 0;
+  return Math.min(period.totalDays || 31, countWorkDaysBetween(period.start, end));
+}
+
+function salaryCompletedPeriodInfo(type) {
+  var period = salaryPeriodInfo(type || 'monthly');
+  var today = new Date();
+  var yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1, 23, 59, 59);
+  var completedEnd = yesterday < period.end ? yesterday : period.end;
+  return Object.assign({}, period, { end: completedEnd });
+}
+
+async function syncSalaryAfterAttendanceChange(empId) {
+  if (!empId) return;
+  if (typeof clearSalaryCacheForEmployee === 'function') clearSalaryCacheForEmployee(empId);
+  var emp = (employees || []).find(function (e) { return e && e.id === empId; });
+  if (!emp) return;
+  if (typeof prefetchSalaryPreviews === 'function') {
+    try {
+      await prefetchSalaryPreviews([emp]);
+    } catch (e) {
+      console.warn('syncSalaryAfterAttendanceChange:', e);
+    }
+  }
+  if (document.getElementById('sal-table') && typeof buildSalaries === 'function') buildSalaries();
+  if (currentUser === 'emp' && typeof buildEmpPortal === 'function') buildEmpPortal();
+}
+
 function upsertEmployeeIntoStore(emp) {
   if (!emp || !emp.id) return;
   normalizeEmployee(emp);
@@ -656,10 +747,9 @@ function purgeEmployeeLocalState(id) {
       return !n || Number(n.empId) !== empId;
     });
   }
-  try {
-    var regEmp = parseInt(localStorage.getItem('basma_registered_emp') || '0', 10);
-    if (regEmp === empId && typeof clearRegisteredDeviceCache === 'function') clearRegisteredDeviceCache();
-  } catch (e) { /* ignore */ }
+  if (window.__basmaEmpSession && parseInt(window.__basmaEmpSession.empId || '0', 10) === empId && typeof clearRegisteredDeviceCache === 'function') {
+    clearRegisteredDeviceCache();
+  }
   if (window.loggedInEmpId === empId) {
     window.loggedInEmpId = null;
     currentUser = null;
@@ -723,6 +813,8 @@ function mergeRemoteEmployeesWithLocal(remoteEmps) {
       salDeletedPeriod: local.salDeletedPeriod != null ? local.salDeletedPeriod : remote.salDeletedPeriod,
       salStatus: local.salStatus || remote.salStatus,
       salBonus: local.salBonus != null ? local.salBonus : remote.salBonus,
+      hireDate: (local.hireDate != null && local.hireDate !== '') ? local.hireDate : remote.hireDate,
+      active: preferLocal ? (local.active !== false) : (remote.active !== false),
       devices: mergeEmployeeDevicesPreferLinked(local.devices, remote.devices),
       _pendingRemoteSync: local._pendingRemoteSync,
       _addedAt: local._addedAt,
@@ -750,19 +842,75 @@ function mergeRemoteEmployeesWithLocal(remoteEmps) {
   return merged;
 }
 
+function isOfficialClosureErrorCode(code, detail) {
+  var c = String(code || '').toLowerCase();
+  var d = String(detail || '').toLowerCase();
+  var merged = c + ' ' + d;
+  if (merged.indexOf('official_closure_active') >= 0) return true;
+  if (merged.indexOf('official closure') >= 0) return true;
+  if (merged.indexOf('تعطيل') >= 0 && merged.indexOf('رسمي') >= 0) return true;
+  if (merged.indexOf('عطلة') >= 0 && merged.indexOf('رسمية') >= 0) return true;
+  if (!c) return false;
+  return c === 'official_closure_active';
+}
+
+function mapAttendanceSaveErrorMessage(errCode, errDetail, mode) {
+  var code = String(errCode || '').toLowerCase();
+  var detail = String(errDetail || '');
+  var actionWord = mode === 'checkout' ? 'الانصراف' : 'الحضور';
+  if (code === 'employee_suspended') return 'تم إيقاف حسابك، يرجى مراجعة الإدارة.';
+  if (code === 'subscription_inactive') return 'حساب الشركة موقوف — لا يمكن تسجيل ' + actionWord + '.';
+  if (code === 'rate_limited') return 'تم تجاوز عدد المحاولات، حاول لاحقاً.';
+  if (isOfficialClosureErrorCode(code, detail)) return 'الموقع معطل حالياً بسبب عطلة رسمية للشركة خلال الفترة المحددة في الإعدادات.';
+  if (code === 'device_not_authorized') return 'الجهاز غير مصرح.';
+  if (code.indexOf('rpc_function_missing') >= 0 || code.indexOf('could not find the function') >= 0 || code === 'pgrst202') {
+    return 'تعذّر حفظ البصمة لأن دالة الحضور غير محدثة على السحابة. يلزم تشغيل آخر migrations ثم إعادة المحاولة.';
+  }
+  if (code.indexOf('no_auth') >= 0 || code.indexOf('jwt') >= 0) {
+    return 'انتهت الجلسة أو غير مصرح لك. أعد تسجيل الدخول ثم حاول مرة أخرى.';
+  }
+  if (code === 'no_company_context' || code === 'tenant_mismatch') {
+    return 'تعذّر حفظ ' + actionWord + ' — دالة الحضور على السحابة تحتاج تحديث migration 106. اطلب من المسؤول تشغيله في Supabase.';
+  }
+  if (code === 'cloud_unavailable') {
+    return 'تعذّر الاتصال بالسحابة حالياً. تحقق من الإنترنت ثم حاول مرة أخرى.';
+  }
+  if (code === 'attendance_not_saved') {
+    return 'تم رفض حفظ سجل الحضور من الخادم (حفظ إحصائيات فقط). يلزم تحديث دالة الحضور في Supabase.';
+  }
+  var mergedErr = (code + ' ' + detail).toLowerCase();
+  if (/updated_at/i.test(mergedErr) && /attendance/i.test(mergedErr)) {
+    return 'تعذّر حفظ ' + actionWord + ' — يلزم تطبيق migration 122 على Supabase. اطلب من المسؤول ثم أعد المحاولة.';
+  }
+  if (/does not exist/i.test(mergedErr) && /column/i.test(mergedErr)) {
+    var rawHint = String(detail || code || '').trim();
+    return 'تعذّر حفظ ' + actionWord + ' في السحابة. السبب: ' + (rawHint || 'خطأ عمود في قاعدة البيانات — طبّق migration 122');
+  }
+  var hint = code || String(detail || '').trim();
+  if (hint) return 'تعذّر حفظ ' + actionWord + ' في السحابة. السبب: ' + hint;
+  return 'تعذّر حفظ ' + actionWord + ' في السحابة. تحقق من الإنترنت ثم حاول مرة أخرى.';
+}
+
 async function persistAttendanceNow(rec) {
   if (!rec) return null;
   try {
     var saved = null;
+    if (currentUser === 'emp' && typeof sb_upsertAttendanceFromDevice !== 'function') {
+      return { ok: false, error: 'cloud_unavailable' };
+    }
     if (currentUser === 'emp' && typeof sb_upsertAttendanceFromDevice === 'function') {
       saved = await sb_upsertAttendanceFromDevice(rec);
+      if (!saved) return { ok: false, error: 'cloud_unavailable' };
       if (saved && saved.ok === false) {
         rec._pendingRemoteSync = true;
         if (typeof schedulePendingSyncRetry === 'function') schedulePendingSyncRetry();
-        if (typeof showPersistWarning === 'function') showPersistWarning('تعذّر حفظ الحضور في السحابة — سيتم إعادة المحاولة');
         return saved;
       }
       if (saved && saved.id) rec.id = saved.id;
+      if (saved && saved.admin_reason) {
+        rec._adminReason = String(saved.admin_reason);
+        if (rec._adminReason === 'admin_batch_absence') rec._adminBatchAbsence = true;
+      }
     } else if (typeof sb_upsertAttendance === 'function') {
       saved = await sb_upsertAttendance(rec);
       if (saved && saved.id) rec.id = saved.id;
@@ -772,7 +920,17 @@ async function persistAttendanceNow(rec) {
     if (saved) {
       rec._pendingRemoteSync = false;
       rec._localAttEditAt = Date.now();
+      if (saved.id) rec.id = saved.id;
+      if (saved.admin_reason) {
+        rec._adminReason = String(saved.admin_reason);
+        if (rec._adminReason === 'admin_batch_absence') rec._adminBatchAbsence = true;
+      }
       if (typeof kynoAttendanceSyncHash === 'function') rec._lastCloudSyncHash = kynoAttendanceSyncHash(rec);
+      if (rec.empId && typeof syncSalaryAfterAttendanceChange === 'function') {
+        syncSalaryAfterAttendanceChange(rec.empId).catch(function (e) {
+          console.warn('syncSalaryAfterAttendanceChange:', e);
+        });
+      }
       if (typeof BasmaCloud !== 'undefined') {
         if (BasmaCloud.updateConnectivityBanner) BasmaCloud.updateConnectivityBanner();
         if (currentUser !== 'emp' && BasmaCloud.scheduleImmediateCloudSync) BasmaCloud.scheduleImmediateCloudSync('attendance-saved');
@@ -785,16 +943,30 @@ async function persistAttendanceNow(rec) {
     return saved;
   } catch (e) {
     console.warn('persistAttendanceNow failed:', e);
-    if (rec) rec._pendingRemoteSync = true;
-    if (typeof schedulePendingSyncRetry === 'function') schedulePendingSyncRetry();
-    return null;
+    if (rec) {
+      rec._pendingRemoteSync = true;
+      if (typeof schedulePendingSyncRetry === 'function') schedulePendingSyncRetry();
+    }
+    return { ok: false, error: 'cloud_unavailable' };
   }
 }
 
 function ensureAttendanceRecordDates(rec) {
   if (!rec) return rec;
-  if (!rec.dateIso && typeof todayIsoDate === 'function') rec.dateIso = todayIsoDate();
-  if (!rec.date && typeof todayAttDate === 'function') rec.date = todayAttDate();
+  var iso = attendanceRecordIso(rec);
+  if (iso) {
+    rec.dateIso = iso;
+    if (!rec.date || rec.date === '—') {
+      rec.date = typeof formatAttendanceDisplayDate === 'function'
+        ? formatAttendanceDisplayDate(rec)
+        : iso.replace(/-/g, '/');
+    }
+    return rec;
+  }
+  if (rec._punchType && typeof todayIsoDate === 'function') {
+    rec.dateIso = todayIsoDate();
+    if (!rec.date && typeof todayAttDate === 'function') rec.date = todayAttDate();
+  }
   return rec;
 }
 
@@ -814,6 +986,7 @@ function calcAttendanceWorkHours(rec, emp) {
   var ciMin = timeToMinutes(rec.ci);
   var coMin = timeToMinutes(rec.co);
   if (coMin >= ciMin) return minutesToHoursStr(coMin - ciMin);
+  if (isOvernightShift(emp)) return minutesToHoursStr((24 * 60 - ciMin) + coMin);
   return '0س 0د';
 }
 
@@ -868,14 +1041,19 @@ function applyOptimisticPunchToRecord(rec, punchType) {
     syncAttendanceRecordHours(rec, emp);
   }
   rec._localAttEditAt = Date.now();
-  rec._pendingRemoteSync = true;
+  if (typeof currentUser === 'undefined' || currentUser !== 'emp') {
+    rec._pendingRemoteSync = true;
+  }
   return rec;
 }
 
 function applyServerAttendanceToRecord(rec, saved, emp) {
   if (!rec || !saved || saved.ok !== true) return rec;
+  if (saved.id) rec.id = saved.id;
+  if (saved.date_iso) rec.dateIso = String(saved.date_iso).slice(0, 10);
+  if (saved.date_label) rec.date = saved.date_label;
   var hasServerTimes = !!(saved.check_in && saved.check_in !== '—') || !!(saved.check_out && saved.check_out !== '—');
-  if (saved.server_authoritative !== true && !hasServerTimes) return rec;
+  if (saved.server_authoritative !== true && !hasServerTimes && !saved.id) return rec;
   if (saved.check_in && saved.check_in !== '—') rec.ci = saved.check_in;
   if (saved.check_out && saved.check_out !== '—') rec.co = saved.check_out;
   if (saved.hours && saved.hours !== '—') rec.hrs = saved.hours;
@@ -886,7 +1064,7 @@ function applyServerAttendanceToRecord(rec, saved, emp) {
   if (saved.date_label) rec.date = saved.date_label;
   if (saved.date_iso) rec.dateIso = String(saved.date_iso).slice(0, 10);
   if (emp && saved.late && saved.late !== '—') {
-    var lateNum = parseInt(String(saved.late).replace(/[^\d]/g, ''), 10);
+    var lateNum = parseDurationMinutes(saved.late);
     if (Number.isFinite(lateNum) && lateNum > 0) emp.lateMin = (emp.lateMin || 0) + lateNum;
   }
   return rec;
@@ -1076,6 +1254,54 @@ function attendanceRecordRank(rec) {
   return rank;
 }
 
+/** سجل غياب إداري (دفعة يدوية) — يُحتسب في الراتب ولا يظهر في بصمة الحضور */
+function employeeHireIso(empOrId) {
+  var emp = empOrId;
+  if (typeof empOrId === 'number' || typeof empOrId === 'string') {
+    emp = (employees || []).find(function (e) { return e && String(e.id) === String(empOrId); });
+  }
+  if (!emp) return '';
+  return String(emp.hireDate || emp.hire_date || '').slice(0, 10);
+}
+
+function isHireDateBackfillAbsence(rec) {
+  if (!rec || rec.status !== 'غياب') return false;
+  if (rec._adminReason === 'hire_date_backfill') return true;
+  var hireIso = employeeHireIso(rec.empId);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(hireIso)) return false;
+  var recIso = attendanceRecordIso(rec);
+  if (!recIso) return false;
+  var monthStart = hireIso.slice(0, 8) + '01';
+  var dayBeforeHire = addIsoDays(hireIso, -1);
+  if (!dayBeforeHire || recIso < monthStart || recIso > dayBeforeHire) return false;
+  var todayIso = typeof todayIsoDate === 'function' ? todayIsoDate() : '';
+  if (todayIso && recIso > todayIso) return false;
+  return true;
+}
+
+function isAdminOnlyAbsenceRecord(rec) {
+  if (!rec) return false;
+  if (isHireDateBackfillAbsence(rec)) return false;
+  if (rec._adminReason === 'hire_date_backfill') return false;
+  if (rec._adminBatchAbsence === true) return true;
+  if (rec._adminReason === 'admin_batch_absence') return true;
+  var noCi = !rec.ci || rec.ci === '—';
+  var noCo = !rec.co || rec.co === '—';
+  if (rec._adminReason && rec._adminReason !== 'hire_date_backfill' && rec.status === 'غياب' && noCi && noCo) return true;
+  if (rec.status === 'غياب' && noCi && noCo) return true;
+  return false;
+}
+
+/** سجل بصمة فعلية (حضور/انصراف) — يظهر في شاشة الحضور */
+function isPunchAttendanceRecord(rec) {
+  if (!rec) return false;
+  if (isHireDateBackfillAbsence(rec)) return true;
+  if (isAdminOnlyAbsenceRecord(rec)) return false;
+  if (rec.ci && rec.ci !== '—') return true;
+  if (rec.co && rec.co !== '—') return true;
+  return rec.status && rec.status !== 'غياب';
+}
+
 function dedupeAttendanceRecords(list) {
   var byKey = {};
   (list || []).forEach(function (rec) {
@@ -1092,10 +1318,12 @@ function dedupeAttendanceRecords(list) {
 }
 
 function countEmployeePresentDays(empId, list) {
+  var emp = (employees || []).find(function (e) { return e && e.id === empId; });
   var keys = {};
   (list || []).forEach(function (r) {
     if (!r || r.empId !== empId) return;
     if (!r.ci || r.ci === '—' || r.status === 'غياب') return;
+    if (emp && emp.openHours && (!r.co || r.co === '—')) return;
     var k = attendanceRecordKey(r);
     if (k) keys[k] = true;
   });
@@ -1111,7 +1339,7 @@ function countEmployeeLateMinutes(empId, list) {
     if (!k || seen[k]) return;
     seen[k] = true;
     if (r.late && r.late !== '—') {
-      var n = parseInt(String(r.late).replace(/[^\d]/g, ''), 10);
+      var n = parseDurationMinutes(r.late);
       if (Number.isFinite(n)) total += n;
     }
   });
@@ -1134,6 +1362,50 @@ function isAttendanceRecordToday(r) {
   if (r.dateIso) return String(r.dateIso).slice(0, 10) === iso;
   if (r.date_iso) return String(r.date_iso).slice(0, 10) === iso;
   return r.date === todayAttDate();
+}
+
+function isOvernightShift(emp) {
+  if (!emp) return false;
+  var ci = timeToMinutes(emp.checkIn || (appSettings && appSettings.workStart) || '08:00');
+  var co = timeToMinutes(emp.checkOut || (appSettings && appSettings.workEnd) || '17:00');
+  return co <= ci;
+}
+
+function getAppMinutesNow() {
+  var p = getAppDateParts(new Date());
+  return (parseInt(p.hour, 10) || 0) * 60 + (parseInt(p.minute, 10) || 0);
+}
+
+function isOvernightCheckoutWindow(emp) {
+  if (!isOvernightShift(emp)) return false;
+  return getAppMinutesNow() <= timeToMinutes(emp.checkIn || '22:00');
+}
+
+function isOpenOvernightRecord(r, emp) {
+  if (!r || !emp || !isOvernightShift(emp)) return false;
+  if (!r.ci || r.ci === '—' || (r.co && r.co !== '—')) return false;
+  var iso = typeof attendanceRecordIso === 'function'
+    ? attendanceRecordIso(r)
+    : String(r.dateIso || r.date_iso || '').slice(0, 10);
+  if (!iso) return false;
+  var yesterday = addIsoDays(todayIsoDate(), -1);
+  if (iso !== yesterday) return false;
+  return isOvernightCheckoutWindow(emp);
+}
+
+function isActiveOpenAttendanceRecord(r, emp) {
+  if (!r || !r.ci || r.ci === '—' || (r.co && r.co !== '—')) return false;
+  if (isAttendanceRecordToday(r)) return true;
+  return isOpenOvernightRecord(r, emp);
+}
+
+function getEmpPortalAttendanceRecord(emp) {
+  if (!emp) return null;
+  var todayRec = attData.find(function (r) {
+    return r && r.empId === emp.id && isAttendanceRecordToday(r);
+  });
+  if (todayRec) return todayRec;
+  return findOpenAttendanceRecord(emp.id, false);
 }
 
 function formatAppTimeAmPm(date, withSeconds) {
@@ -1160,7 +1432,7 @@ function syncAttForEmployee(emp) {
       // Recalculate late/ot/status based on current openHours setting
       if (r.ci && r.ci !== '—') {
         if (isComm || emp.openHours) {
-          // Commission or open hours: no late, no overtime, always normal
+          // Commission or open hours: no late/overtime; open hours is counted after checkout.
           r.late = '—';
           r.ot = '—';
           r.status = 'طبيعي';
@@ -1176,8 +1448,7 @@ function syncAttForEmployee(emp) {
 
           const actualCoMin = timeToMinutes(r.co);
           const officialCoMin = timeToMinutes(empCo);
-          
-          if (actualCoMin > 0) {
+          if (actualCoMin > 0 && r.co && r.co !== '—') {
             const otMin = Math.max(0, actualCoMin - officialCoMin);
             r.ot = otMin > 0 ? (Math.floor(otMin/60) + 'س ' + (otMin%60) + 'د') : '—';
           } else {
@@ -1235,13 +1506,15 @@ function recalcAllAttendance() {
   saveData();
 }
 
-function findOpenAttendanceRecord(empId, requireToday) {
+function findOpenAttendanceRecord(empId, requireActiveShift) {
+  var emp = (employees || []).find(function (e) { return e && e.id === empId; });
   return attData.find(function (r) {
     if (!r || r.empId !== empId) return false;
-    if (!r.ci || r.ci === '—') return false;
-    if (r.co && r.co !== '—') return false;
-    if (requireToday !== false && !isAttendanceRecordToday(r)) return false;
-    return true;
+    if (requireActiveShift === false) {
+      return isActiveOpenAttendanceRecord(r, emp);
+    }
+    if (isAttendanceRecordToday(r)) return isActiveOpenAttendanceRecord(r, emp);
+    return isOpenOvernightRecord(r, emp);
   }) || null;
 }
 
@@ -1252,15 +1525,98 @@ function createAttRecord(empId, dept, name) {
   };
 }
 
+/**
+ * توليد سجلات غياب فعلية للأيام السابقة لتاريخ المباشرة داخل شهر المباشرة.
+ * النطاق: من أول يوم في شهر تاريخ المباشرة حتى اليوم السابق للمباشرة.
+ * يتخطّى: السجلات الموجودة مسبقاً، أيام الإجازات المعتمدة، والعطل الرسمية، وأي يوم مستقبلي.
+ * ملاحظة: هذه السجلات تظهر في سجل الحضور والتقارير، ولا تُحتسب في الراتب لأنها قبل تاريخ المباشرة
+ *          (الخادم يبدأ الاحتساب من effective_start = hire_date، والواجهة كذلك بعد هذا التعديل).
+ */
+async function backfillHireDateAbsences(emp) {
+  if (!emp || currentUser === 'emp') return { created: 0 };
+  var hireIso = employeeHireIso(emp);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(hireIso)) return { created: 0 };
+  var todayIso = typeof todayIsoDate === 'function' ? todayIsoDate() : new Date().toISOString().slice(0, 10);
+  var monthStartIso = hireIso.slice(0, 8) + '01';
+  var endIso = addIsoDays(hireIso, -1);
+  if (!endIso || endIso < monthStartIso) return { created: 0 };
+  var recs = [];
+  var cur = monthStartIso;
+  var guard = 0;
+  while (cur && cur <= endIso && guard < 400) {
+    guard++;
+    var iso = cur;
+    cur = addIsoDays(cur, 1);
+    if (iso > todayIso) continue;
+    var key = String(emp.id) + '|' + iso;
+    var dup = (attData || []).find(function (a) { return a && a.empId === emp.id && attendanceRecordKey(a) === key; });
+    if (dup) continue;
+    if (typeof isDateOnEmployeeLeave === 'function' && isDateOnEmployeeLeave(emp.id, iso)) continue;
+    if (typeof officialClosureForDate === 'function' && officialClosureForDate(iso)) continue;
+    var rec = {
+      empId: emp.id, emp: fullEmpName(emp.name), dept: emp.dept,
+      date: iso.replace(/-/g, '/'), dateIso: iso,
+      ci: '—', co: '—', hrs: '—', late: '—', ot: '—', status: 'غياب',
+      _adminReason: 'hire_date_backfill'
+    };
+    if (emp.company_id != null) rec.company_id = emp.company_id;
+    attData.push(rec);
+    recs.push(rec);
+  }
+  for (var i = 0; i < recs.length; i++) {
+    try {
+      if (typeof persistAttendanceNow === 'function') await persistAttendanceNow(recs[i]);
+    } catch (e) { console.warn('backfillHireDateAbsences persist:', e); }
+  }
+  if (recs.length) saveData();
+  return { created: recs.length };
+}
+
+function focusAttendanceHireMonth(empId) {
+  var periodEl = document.getElementById('att-filter-period');
+  if (periodEl) periodEl.value = 'month';
+  var fromEl = document.getElementById('att-filter-from');
+  var toEl = document.getElementById('att-filter-to');
+  if (fromEl) fromEl.value = '';
+  if (toEl) toEl.value = '';
+  if (empId) {
+    var emp = (employees || []).find(function (e) { return e && e.id === empId; });
+    var nameEl = document.getElementById('att-filter-name');
+    if (nameEl && emp && emp.name) nameEl.value = emp.name;
+  }
+}
+
+async function backfillAllHireDateAbsences(options) {
+  options = options || {};
+  if (currentUser === 'emp') return { created: 0 };
+  var total = 0;
+  for (var i = 0; i < (employees || []).length; i++) {
+    var emp = employees[i];
+    if (!emp || !employeeHireIso(emp)) continue;
+    var r = await backfillHireDateAbsences(emp);
+    total += (r && r.created) || 0;
+  }
+  if (total > 0) {
+    if (typeof normalizeAttendanceStore === 'function') normalizeAttendanceStore();
+    if (!options.silent) focusAttendanceHireMonth();
+    if (typeof buildAttendance === 'function') buildAttendance();
+  }
+  return { created: total };
+}
+
 function refreshAll() {
   if (handleDeletedLoggedEmployee()) return;
+  if (typeof hydrateFinanceItemsFromCloud === 'function' && currentUser !== 'emp') {
+    hydrateFinanceItemsFromCloud({ forceRemote: true, replace: true }).catch(function () {});
+  }
   if (syncAllAttendanceEmployeeNames()) saveData();
   if (typeof syncLeavesFromSupabase === 'function') {
     syncLeavesFromSupabase().then(function () {
       if (typeof buildLeaves === 'function' && document.getElementById('leaves-content')) buildLeaves();
-  if (typeof buildLeaveBadge === 'function') buildLeaveBadge();
-  if (typeof updatePendingSyncBadge === 'function') updatePendingSyncBadge();
-}).catch(function (e) { console.warn('refreshAll leaves:', e); });
+      if (typeof buildLeaveBadge === 'function') buildLeaveBadge();
+      if (typeof updatePendingSyncBadge === 'function') updatePendingSyncBadge();
+      if (typeof buildDashboard === 'function') buildDashboard();
+    }).catch(function (e) { console.warn('refreshAll leaves:', e); });
   }
   if (typeof buildEmployees === 'function') buildEmployees();
   if (typeof buildAttendance === 'function') buildAttendance();
@@ -1293,7 +1649,12 @@ function filterEmployees() {
 }
 
 function basmaBootstrapData() {
-  if (typeof loadData === 'function') loadData();
+  var hasEmpSession = !!(window.loggedInEmpId || (window.__basmaEmpSession && window.__basmaEmpSession.empId));
+  if (!hasEmpSession && typeof restoreEmployeeDeviceSession === 'function') {
+    restoreEmployeeDeviceSession();
+    hasEmpSession = !!(window.loggedInEmpId || (window.__basmaEmpSession && window.__basmaEmpSession.empId));
+  }
+  if (!hasEmpSession && typeof loadData === 'function') loadData();
   if (typeof cleanCorruptedData === 'function') cleanCorruptedData();
   if (typeof deduplicateAllDeviceTokens === 'function') deduplicateAllDeviceTokens();
   if (typeof recalcAllAttendance === 'function') recalcAllAttendance();
@@ -1344,12 +1705,312 @@ function setBatchProgress(current, total, detail, subtitle) {
   if (subEl && subtitle) subEl.textContent = subtitle;
 }
 
+function parseIsoDateOnly(value) {
+  var s = String(value || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return '';
+  var d = new Date(s + 'T12:00:00');
+  return Number.isFinite(d.getTime()) ? s : '';
+}
+
+function localDateToIso(date) {
+  if (!date || !Number.isFinite(date.getTime())) return '';
+  var y = date.getFullYear();
+  var m = String(date.getMonth() + 1).padStart(2, '0');
+  var d = String(date.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + d;
+}
+
+function addIsoDays(iso, days) {
+  var clean = parseIsoDateOnly(iso);
+  if (!clean) return '';
+  var d = new Date(clean + 'T12:00:00');
+  d.setDate(d.getDate() + (parseInt(days, 10) || 0));
+  return d.toISOString().slice(0, 10);
+}
+
+function normalizeOfficialClosures(list) {
+  if (!Array.isArray(list)) return [];
+  var out = [];
+  list.forEach(function (item) {
+    if (!item) return;
+    var start = parseIsoDateOnly(item.startDate || item.start || item.from);
+    var days = Math.max(1, parseInt(item.days, 10) || 0);
+    var end = parseIsoDateOnly(item.endDate || item.end || item.to) || (start ? addIsoDays(start, days - 1) : '');
+    if (!start || !end) return;
+    if (new Date(end + 'T12:00:00') < new Date(start + 'T12:00:00')) {
+      var tmp = start; start = end; end = tmp;
+    }
+    var paid = String(item.payType || item.type || '').toLowerCase() !== 'unpaid';
+    var diffDays = Math.round((new Date(end + 'T12:00:00') - new Date(start + 'T12:00:00')) / 86400000) + 1;
+    out.push({
+      id: String(item.id || ('closure_' + start.replace(/-/g, '') + '_' + Math.random().toString(36).slice(2, 8))),
+      title: String(item.title || item.name || 'تعطيل رسمي').trim() || 'تعطيل رسمي',
+      startDate: start,
+      endDate: end,
+      days: Math.max(1, diffDays),
+      payType: paid ? 'paid' : 'unpaid'
+    });
+  });
+  return out.sort(function (a, b) { return String(b.startDate).localeCompare(String(a.startDate)); });
+}
+
+function officialClosureForDate(dateIso) {
+  var iso = parseIsoDateOnly(dateIso || (typeof todayIsoDate === 'function' ? todayIsoDate() : ''));
+  if (!iso) return null;
+  var closures = normalizeOfficialClosures(appSettings.officialClosures || []);
+  for (var i = 0; i < closures.length; i++) {
+    var c = closures[i];
+    if (iso >= c.startDate && iso <= c.endDate) return c;
+  }
+  if (currentUser === 'emp' && window.__empActiveOfficialClosure) {
+    var ac = window.__empActiveOfficialClosure;
+    if (iso >= ac.startDate && iso <= ac.endDate) return ac;
+  }
+  return null;
+}
+
+async function refreshOfficialClosuresFromCloud() {
+  if (currentUser === 'emp' && window.loggedInEmpId) {
+    window.__empActiveOfficialClosure = null;
+    try {
+      if (typeof sb_getActiveOfficialClosureForEmployee === 'function') {
+        var active = await sb_getActiveOfficialClosureForEmployee(window.loggedInEmpId);
+        if (active && active.ok === true && active.active === true && active.closure) {
+          var activeNorm = normalizeOfficialClosures([active.closure]);
+          window.__empActiveOfficialClosure = activeNorm[0] || active.closure;
+          var mergedActive = normalizeOfficialClosures(appSettings.officialClosures || []);
+          var hitActive = mergedActive.some(function (c) { return c.id === window.__empActiveOfficialClosure.id; });
+          if (!hitActive) mergedActive.push(window.__empActiveOfficialClosure);
+          appSettings.officialClosures = normalizeOfficialClosures(mergedActive);
+          if (typeof saveData === 'function') saveData();
+        }
+      }
+      if (typeof sb_getOfficialClosuresJsonForEmployee === 'function') {
+        var closuresPayload = await sb_getOfficialClosuresJsonForEmployee(window.loggedInEmpId);
+        if (closuresPayload && closuresPayload.ok === true && closuresPayload.closures_json != null) {
+          var parsed = [];
+          try {
+            parsed = JSON.parse(closuresPayload.closures_json || '[]') || [];
+          } catch (parseErr) {
+            parsed = [];
+          }
+          appSettings.officialClosures = normalizeOfficialClosures(parsed);
+          if (typeof saveData === 'function') saveData();
+        }
+      }
+      if (typeof renderOfficialClosureEmpBanner === 'function' && typeof bindOfficialClosureAttendanceButtons === 'function') {
+        var uiClosure = officialClosureForDate();
+        renderOfficialClosureEmpBanner(uiClosure);
+        bindOfficialClosureAttendanceButtons(uiClosure);
+      }
+    } catch (e) {
+      console.warn('refreshOfficialClosuresFromCloud emp:', e);
+    }
+    if (typeof renderOfficialClosureEmpBanner === 'function' && typeof bindOfficialClosureAttendanceButtons === 'function') {
+      var uiClosureFallback = officialClosureForDate();
+      renderOfficialClosureEmpBanner(uiClosureFallback);
+      bindOfficialClosureAttendanceButtons(uiClosureFallback);
+    }
+    return !!(appSettings.officialClosures && appSettings.officialClosures.length) || !!window.__empActiveOfficialClosure;
+  }
+  if (typeof sb_getSettings !== 'function' || typeof applyRemoteAppSettings !== 'function') return false;
+  try {
+    var settings = await sb_getSettings();
+    if (!settings) return false;
+    applyRemoteAppSettings(settings, { forceRemote: true });
+    if (typeof saveData === 'function') saveData();
+    return true;
+  } catch (e) {
+    console.warn('refreshOfficialClosuresFromCloud:', e);
+    return false;
+  }
+}
+
+function countOfficialClosureDaysBetween(fromIso, toIso, payType) {
+  var from = parseIsoDateOnly(fromIso);
+  var to = parseIsoDateOnly(toIso);
+  if (!from || !to || new Date(to + 'T12:00:00') < new Date(from + 'T12:00:00')) return 0;
+  var seen = {};
+  normalizeOfficialClosures(appSettings.officialClosures || []).forEach(function (c) {
+    if (payType && c.payType !== payType) return;
+    var start = c.startDate > from ? c.startDate : from;
+    var end = c.endDate < to ? c.endDate : to;
+    if (end < start) return;
+    for (var d = start; d <= end; d = addIsoDays(d, 1)) {
+      seen[d] = true;
+      if (d === end) break;
+    }
+  });
+  return Object.keys(seen).length;
+}
+
+function renderOfficialClosuresList() {
+  var wrap = document.getElementById('official-closures-list');
+  if (!wrap) return;
+  var closures = normalizeOfficialClosures(appSettings.officialClosures || []);
+  appSettings.officialClosures = closures;
+  if (!closures.length) {
+    wrap.innerHTML = '<div class="settings-hint" style="padding:10px;border:1px dashed var(--border);border-radius:10px">لا توجد عطل رسمية محفوظة حالياً.</div>';
+    return;
+  }
+  wrap.innerHTML = closures.map(function (c) {
+    var paidText = c.payType === 'paid' ? 'براتب' : 'بدون راتب';
+    var paidColor = c.payType === 'paid' ? '#68d391' : '#fc8181';
+    return '<div style="display:flex;gap:8px;align-items:center;justify-content:space-between;padding:10px;margin-top:8px;border:1px solid var(--border);border-radius:10px;background:rgba(255,255,255,0.03)">' +
+      '<div style="line-height:1.7"><b>' + esc(c.title) + '</b><div style="font-size:12px;color:var(--text-muted)">' + esc(c.startDate) + ' إلى ' + esc(c.endDate) + ' — ' + c.days + ' يوم — <span style="color:' + paidColor + ';font-weight:700">' + paidText + '</span></div></div>' +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap"><button type="button" class="btn-sm btn-primary" data-perm="settings.edit" onclick="openOfficialClosureForm(\'' + esc(c.id) + '\')"><i class="fa fa-edit"></i></button>' +
+      '<button type="button" class="btn-sm btn-danger" data-perm="settings.edit" onclick="deleteOfficialClosure(\'' + esc(c.id) + '\')"><i class="fa fa-trash"></i></button></div>' +
+      '</div>';
+  }).join('');
+  if (typeof applyPermissionUi === 'function') applyPermissionUi();
+}
+
+function clearAllSalaryPreviewCache() {
+  if (window._salaryPreviewCache && typeof window._salaryPreviewCache.clear === 'function') window._salaryPreviewCache.clear();
+  if (typeof clearSalaryCacheForEmployee === 'function') {
+    (employees || []).forEach(function (e) { if (e && e.id) clearSalaryCacheForEmployee(e.id); });
+  }
+}
+
+async function saveOfficialClosuresSettings(message) {
+  appSettings.officialClosures = normalizeOfficialClosures(appSettings.officialClosures || []);
+  window.__basmaOfficialClosuresLocalAt = Date.now();
+  clearAllSalaryPreviewCache();
+  logActivity('edit', 'settings', message || 'تعديل إعدادات تعطيل الروابط', { deferSave: true });
+  pauseRemoteSync(45000);
+  window.__basmaLocalSettingsAt = Date.now();
+  var expectedCount = appSettings.officialClosures.length;
+  var ok = false;
+  if (typeof sb_saveOfficialClosuresJson === 'function') {
+    ok = await sb_saveOfficialClosuresJson(appSettings.officialClosures);
+  }
+  if (!ok) {
+    var cloud = await commitAppSettingsToCloud({ pauseMs: 45000, resumeMs: 15000 });
+    ok = !!(cloud && cloud.ok);
+  } else {
+    resumeRemoteSync(15000);
+  }
+  if (ok && typeof sb_verifyOfficialClosuresJson === 'function') {
+    ok = await sb_verifyOfficialClosuresJson(expectedCount);
+  }
+  saveData();
+  renderOfficialClosuresList();
+  buildSalaries();
+  if (typeof buildPaidSalaries === 'function') buildPaidSalaries();
+  return { ok: !!ok };
+}
+
+async function openOfficialClosureForm(id) {
+  if (!requireActionPermission('settings', 'edit')) return;
+  appSettings.officialClosures = normalizeOfficialClosures(appSettings.officialClosures || []);
+  var current = (appSettings.officialClosures || []).find(function (c) { return c.id === id; }) || null;
+  var today = typeof todayIsoDate === 'function' ? todayIsoDate() : new Date().toISOString().slice(0, 10);
+  var html = '<div style="text-align:right;direction:rtl">' +
+    '<label class="setting-label">اسم العطلة</label><input id="closure-title" class="swal2-input" style="width:100%;margin:6px 0" value="' + esc(current ? current.title : 'تعطيل رسمي') + '">' +
+    '<label class="setting-label">تاريخ بداية التعطيل</label><input id="closure-start" type="date" class="swal2-input" style="width:100%;margin:6px 0" value="' + esc(current ? current.startDate : today) + '">' +
+    '<label class="setting-label">عدد أيام التعطيل</label><input id="closure-days" type="number" min="1" max="60" step="1" class="swal2-input" style="width:100%;margin:6px 0" value="' + esc(current ? current.days : 1) + '">' +
+    '<label class="setting-label">احتساب أيام العطلة</label><select id="closure-pay-type" class="swal2-select" style="width:100%;margin:6px 0"><option value="paid"' + (!current || current.payType === 'paid' ? ' selected' : '') + '>براتب - لا تخصم من الموظفين</option><option value="unpaid"' + (current && current.payType === 'unpaid' ? ' selected' : '') + '>بدون راتب - تخصم من الرواتب</option></select>' +
+    '</div>';
+  var res = await Swal.fire({
+    title: current ? 'تعديل تعطيل الرابط' : 'تعطيل الرابط',
+    html: html,
+    showCancelButton: true,
+    confirmButtonText: 'حفظ',
+    cancelButtonText: 'إلغاء',
+    focusConfirm: false,
+    preConfirm: function () {
+      var title = (document.getElementById('closure-title')?.value || '').trim() || 'تعطيل رسمي';
+      var start = parseIsoDateOnly(document.getElementById('closure-start')?.value || '');
+      var days = parseInt(document.getElementById('closure-days')?.value, 10);
+      var payType = document.getElementById('closure-pay-type')?.value === 'unpaid' ? 'unpaid' : 'paid';
+      if (!start) return Swal.showValidationMessage('اختر تاريخ بداية صحيح');
+      if (!Number.isFinite(days) || days < 1 || days > 60) return Swal.showValidationMessage('عدد الأيام يجب أن يكون بين 1 و 60');
+      return { id: current ? current.id : ('closure_' + Date.now()), title: title, startDate: start, endDate: addIsoDays(start, days - 1), days: days, payType: payType };
+    },
+    ...swalTheme()
+  });
+  if (!res.isConfirmed || !res.value) return;
+  var next = appSettings.officialClosures.filter(function (c) { return c.id !== res.value.id; });
+  next.push(res.value);
+  appSettings.officialClosures = normalizeOfficialClosures(next);
+  var cloud = await saveOfficialClosuresSettings((current ? 'تعديل' : 'إضافة') + ' تعطيل روابط: ' + res.value.title);
+  Swal.fire({
+    icon: cloud.ok ? 'success' : 'error',
+    title: cloud.ok ? 'تم الحفظ في السحابة' : 'تعذّر الحفظ في السحابة',
+    text: cloud.ok
+      ? 'تم حفظ تعطيل الرابط — سيتم تطبيقه على جميع الموظفين.'
+      : 'لم يُحفظ التعطيل في Supabase. أعد تسجيل الدخول كمسؤول ثم احفظ مرة أخرى.',
+    timer: cloud.ok ? 2400 : undefined,
+    showConfirmButton: !cloud.ok,
+    ...swalTheme()
+  });
+}
+
+async function deleteOfficialClosure(id) {
+  if (!requireActionPermission('settings', 'edit')) return;
+  var current = normalizeOfficialClosures(appSettings.officialClosures || []).find(function (c) { return c.id === id; });
+  if (!current) return;
+  var res = await Swal.fire({ icon: 'warning', title: 'حذف التعطيل؟', text: current.title, showCancelButton: true, confirmButtonText: 'حذف', cancelButtonText: 'إلغاء', ...swalTheme() });
+  if (!res.isConfirmed) return;
+  appSettings.officialClosures = normalizeOfficialClosures(appSettings.officialClosures || []).filter(function (c) { return c.id !== id; });
+  var cloud = await saveOfficialClosuresSettings('حذف تعطيل روابط: ' + current.title);
+  Swal.fire({
+    icon: cloud.ok ? 'success' : 'error',
+    title: cloud.ok ? 'تم الحذف من السحابة' : 'تعذّر الحذف من السحابة',
+    timer: cloud.ok ? 1800 : undefined,
+    showConfirmButton: !cloud.ok,
+    ...swalTheme()
+  });
+}
+
+function renderOfficialClosureEmpBanner(closure) {
+  var box = document.getElementById('emp-closure-banner');
+  if (!box) return;
+  if (!closure) {
+    box.style.display = 'none';
+    box.innerHTML = '';
+    return;
+  }
+  box.style.display = 'block';
+  box.innerHTML = '<div style="padding:12px 14px;border-radius:12px;border:1px solid rgba(128,90,213,0.35);background:rgba(128,90,213,0.12);color:#e9d8fd;line-height:1.8">' +
+    '<b>⛔ الموقع معطل حالياً — عطلة رسمية</b><br>' +
+    'العطلة: <b>' + esc(closure.title) + '</b><br>' +
+    'المدة: من ' + esc(closure.startDate) + ' إلى ' + esc(closure.endDate) + ' (' + esc(closure.days) + ' يوم)<br>' +
+    '<span style="font-size:12px;opacity:0.9">لا يمكن تسجيل الحضور أو الانصراف خلال فترة التعطيل.</span>' +
+    '</div>';
+}
+
+function bindOfficialClosureAttendanceButtons(closure) {
+  document.querySelectorAll('.attendance-btns .att-btn').forEach(function (btn) {
+    btn.disabled = false;
+    btn.style.pointerEvents = '';
+    btn.style.opacity = closure ? '0.85' : '';
+    btn.title = closure ? 'الموقع معطل بسبب عطلة رسمية — مرّر لعرض التفاصيل' : '';
+    // ملاحظة: تسجيل الحضور/الانصراف يتم عبر Slide-to-Confirm (slide-confirm.js)
+    // الذي يستدعي checkIn()/checkOut() بعد التمرير الكامل + التأكيد؛ لذا لا نربط onclick مباشر
+    // لمنع التسجيل بالخطأ عبر الضغط. checkIn/checkOut نفسها تتحقق من العطلة الرسمية داخلياً.
+  });
+}
+
+function showOfficialClosureBlock(closure, actionText) {
+  if (!closure) return false;
+  Swal.fire({
+    icon: 'info',
+    title: 'الموقع معطل حالياً',
+    html: 'السبب: <b>عطلة رسمية</b><br>العطلة: <b>' + esc(closure.title) + '</b><br>المدة: من ' + esc(closure.startDate) + ' إلى ' + esc(closure.endDate) + ' (' + esc(closure.days) + ' يوم)<br>لا يمكن ' + esc(actionText || 'استخدام موقع الموظف') + ' خلال فترة التعطيل.',
+    ...swalTheme()
+  });
+  return true;
+}
+
+
 function repaintBatchProgressFrame() {
   return new Promise(function (resolve) { requestAnimationFrame(resolve); });
 }
 
 async function runWithBatchProgress(opts) {
   var total = Math.max(1, opts.total || 1);
+  window.__basmaPreserveSwal = true;
   Swal.fire({
     html: batchProgressHtml(opts.title || 'جاري المعالجة...', opts.subtitle || ''),
     width: 440,
@@ -1368,6 +2029,7 @@ async function runWithBatchProgress(opts) {
   try {
     return await opts.run(update);
   } finally {
+    window.__basmaPreserveSwal = false;
     if (Swal.isVisible()) Swal.close();
     await repaintBatchProgressFrame();
   }
@@ -1377,7 +2039,6 @@ function setTheme(theme, opts) {
   opts = opts || {};
   const t = theme === 'light' ? 'light' : 'dark';
   document.documentElement.setAttribute('data-theme', t);
-  localStorage.setItem(THEME_KEY, t);
   document.getElementById('theme-btn-dark')?.classList.toggle('active', t === 'dark');
   document.getElementById('theme-btn-light')?.classList.toggle('active', t === 'light');
   document.getElementById('sa-theme-btn-dark')?.classList.toggle('active', t === 'dark');
@@ -1391,7 +2052,7 @@ function setTheme(theme, opts) {
     persistUiThemeToCloud(t).catch(function (e) { console.warn('persistUiThemeToCloud:', e); });
   }
 }
-function initTheme() { setTheme(localStorage.getItem(THEME_KEY) || 'dark', { skipCloud: true }); }
+function initTheme() { setTheme('dark', { skipCloud: true }); }
 
 async function persistUiThemeToCloud(theme) {
   if (typeof AuthApi !== 'undefined' && AuthApi.ensureValidSession) {
@@ -1484,6 +2145,8 @@ function syncSettingsUi() {
   if (typeof BasmaLeaveGuard !== 'undefined' && BasmaLeaveGuard.updateSyncStatusUi) {
     BasmaLeaveGuard.updateSyncStatusUi();
   }
+  renderOfficialClosuresList();
+  if (typeof renderBroadcastNoticesList === 'function') renderBroadcastNoticesList();
 
   // GPS settings
   const gl = document.getElementById('set-gps-lat');
@@ -1564,7 +2227,7 @@ function saveCompanySettings() {
     if (cloud.ok) {
       Swal.fire({ icon: 'success', title: 'تم الحفظ', text: 'تم حفظ إعدادات الشركة في السحابة', ...swalTheme(), timer: 2000, showConfirmButton: false });
     } else {
-      Swal.fire({ icon: 'warning', title: 'تم الحفظ محلياً', html: 'لم يُرفع للسحابة — <b>أعد تسجيل الدخول</b> ثم احفظ مرة أخرى.', ...swalTheme() });
+      Swal.fire({ icon: 'error', title: 'لم يتم الحفظ', html: 'تعذّر حفظ الإعدادات في السحابة.<br><b>تحقق من الإنترنت أو أعد تسجيل الدخول</b> ثم حاول مرة أخرى.', ...swalTheme() });
     }
   });
 }
@@ -1575,23 +2238,127 @@ function isValidCoord(lat, lng) {
   return Number.isFinite(la) && Number.isFinite(ln) && la >= -90 && la <= 90 && ln >= -180 && ln <= 180;
 }
 
-function previewGpsMap() {
-  const lat = document.getElementById('set-gps-lat')?.value || appSettings.gpsLat || '33.3152';
-  const lng = document.getElementById('set-gps-lng')?.value || appSettings.gpsLng || '44.3661';
-  const range = parseInt(document.getElementById('set-gps-range')?.value, 10) || appSettings.gpsRange || 100;
-  const name = document.getElementById('set-gps-name')?.value || appSettings.gpsName || 'موقع الشركة';
-  const frame = document.getElementById('gps-map-frame');
-  const label = document.getElementById('gps-map-label');
-  const coords = document.getElementById('gps-map-coords');
-  if (!frame || !isValidCoord(lat, lng)) return;
-  const la = Number(lat);
-  const ln = Number(lng);
-  const delta = Math.max(0.001, Math.min(0.03, range / 111000 * 3));
-  frame.src = 'https://www.openstreetmap.org/export/embed.html?bbox=' +
+var _gpsMap = null;
+var _gpsMarker = null;
+var _gpsCircle = null;
+var _gpsPreviewTimer = null;
+var _gpsLastPreviewKey = '';
+var _gpsUpdatingInputsFromMap = false;
+
+function readGpsFormValues() {
+  return {
+    lat: (document.getElementById('set-gps-lat')?.value || appSettings.gpsLat || '33.3152').trim(),
+    lng: (document.getElementById('set-gps-lng')?.value || appSettings.gpsLng || '44.3661').trim(),
+    range: parseInt(document.getElementById('set-gps-range')?.value, 10) || appSettings.gpsRange || 100,
+    name: (document.getElementById('set-gps-name')?.value || appSettings.gpsName || 'موقع الشركة').trim() || 'موقع الشركة'
+  };
+}
+
+function setGpsInputs(lat, lng, range) {
+  var latEl = document.getElementById('set-gps-lat');
+  var lngEl = document.getElementById('set-gps-lng');
+  var rangeEl = document.getElementById('set-gps-range');
+  _gpsUpdatingInputsFromMap = true;
+  if (latEl && Number.isFinite(Number(lat))) latEl.value = Number(lat).toFixed(6);
+  if (lngEl && Number.isFinite(Number(lng))) lngEl.value = Number(lng).toFixed(6);
+  if (rangeEl && range != null) rangeEl.value = String(Math.max(10, Math.min(5000, parseInt(range, 10) || 100)));
+  _gpsUpdatingInputsFromMap = false;
+}
+
+function updateGpsMapLabel(lat, lng, range, name) {
+  var label = document.getElementById('gps-map-label');
+  var coords = document.getElementById('gps-map-coords');
+  if (label) label.textContent = (name || 'موقع الشركة') + ' - نطاق ' + range + 'م';
+  if (coords) coords.textContent = Number(lat).toFixed(6) + ', ' + Number(lng).toFixed(6);
+}
+
+function fallbackGpsIframe(lat, lng, range, name) {
+  var frame = document.getElementById('gps-map-frame');
+  if (!frame) return;
+  var la = Number(lat);
+  var ln = Number(lng);
+  var delta = Math.max(0.001, Math.min(0.03, range / 111000 * 3));
+  var nextSrc = 'https://www.openstreetmap.org/export/embed.html?bbox=' +
     encodeURIComponent((ln - delta) + ',' + (la - delta) + ',' + (ln + delta) + ',' + (la + delta)) +
     '&layer=mapnik&marker=' + encodeURIComponent(la + ',' + ln);
-  if (label) label.textContent = name + ' - نطاق ' + range + 'م';
-  if (coords) coords.textContent = la.toFixed(6) + ', ' + ln.toFixed(6);
+  if (frame.src !== nextSrc) frame.src = nextSrc;
+  frame.style.display = 'block';
+  updateGpsMapLabel(la, ln, range, name);
+}
+
+function ensureGpsLeafletMap(lat, lng, range, name) {
+  var mapEl = document.getElementById('gps-leaflet-map');
+  if (!mapEl || typeof L === 'undefined' || !L.map) return false;
+  var la = Number(lat);
+  var ln = Number(lng);
+  if (!_gpsMap) {
+    _gpsMap = L.map(mapEl, {
+      center: [la, ln],
+      zoom: 17,
+      scrollWheelZoom: true
+    });
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap'
+    }).addTo(_gpsMap);
+    _gpsMarker = L.marker([la, ln], { draggable: true }).addTo(_gpsMap);
+    _gpsCircle = L.circle([la, ln], {
+      radius: range,
+      color: '#00d4aa',
+      weight: 2,
+      fillColor: '#00d4aa',
+      fillOpacity: 0.12
+    }).addTo(_gpsMap);
+    _gpsMarker.on('dragend', function () {
+      var p = _gpsMarker.getLatLng();
+      var values = readGpsFormValues();
+      setGpsInputs(p.lat, p.lng, values.range);
+      previewGpsMap({ source: 'marker', force: true });
+    });
+    _gpsMap.on('click', function (evt) {
+      if (!evt || !evt.latlng) return;
+      var values = readGpsFormValues();
+      setGpsInputs(evt.latlng.lat, evt.latlng.lng, values.range);
+      previewGpsMap({ source: 'map', force: true });
+    });
+    setTimeout(function () { try { _gpsMap.invalidateSize(); } catch (e) {} }, 80);
+  }
+  _gpsMarker.setLatLng([la, ln]);
+  _gpsCircle.setLatLng([la, ln]);
+  _gpsCircle.setRadius(range);
+  _gpsMap.setView([la, ln], Math.max(_gpsMap.getZoom() || 17, 16), { animate: false });
+  updateGpsMapLabel(la, ln, range, name);
+  return true;
+}
+
+function scheduleGpsMapPreview(source) {
+  if (_gpsUpdatingInputsFromMap) return;
+  clearTimeout(_gpsPreviewTimer);
+  _gpsPreviewTimer = setTimeout(function () {
+    previewGpsMap({ source: source || 'manual' });
+  }, source === 'manual' ? 550 : 80);
+}
+
+function previewGpsMap(options) {
+  options = options || {};
+  const values = readGpsFormValues();
+  const lat = values.lat;
+  const lng = values.lng;
+  const range = Math.max(10, Math.min(5000, values.range));
+  const name = values.name;
+  if (!isValidCoord(lat, lng)) {
+    updateGpsMapLabel(appSettings.gpsLat || 33.3152, appSettings.gpsLng || 44.3661, range, 'إحداثيات غير صحيحة');
+    return false;
+  }
+  const la = Number(lat);
+  const ln = Number(lng);
+  const key = la.toFixed(6) + '|' + ln.toFixed(6) + '|' + range + '|' + name;
+  if (!options.force && key === _gpsLastPreviewKey) return true;
+  _gpsLastPreviewKey = key;
+  if (!ensureGpsLeafletMap(la, ln, range, name)) {
+    fallbackGpsIframe(la, ln, range, name);
+  }
+  return true;
 }
 
 function useMyLocationForCompany() {
@@ -1610,7 +2377,7 @@ function useMyLocationForCompany() {
     if (latEl) latEl.value = lat;
     if (lngEl) lngEl.value = lng;
     if (rangeEl && acc > 0) rangeEl.value = Math.max(parseInt(rangeEl.value, 10) || 100, Math.min(1000, acc + 100));
-    previewGpsMap();
+    previewGpsMap({ source: 'location', force: true });
     Swal.fire({ icon:'success', title:'تم تحديد الموقع', html:'الإحداثيات:<br><b dir="ltr">' + lat + ', ' + lng + '</b><br>دقة الجهاز تقريباً: ' + acc + ' متر', ...swalTheme() });
   }, err => {
     Swal.fire({ icon:'error', title:'تعذر تحديد الموقع', text: err.message || 'تحقق من صلاحيات الموقع في المتصفح', ...swalTheme() });
@@ -1653,16 +2420,21 @@ function saveGpsSettings() {
   const range = parseInt(document.getElementById('set-gps-range').value, 10) || 100;
   if (!lat || !lng) { Swal.fire({ icon: 'warning', title: 'مطلوب', text: 'إحداثيات الموقع مطلوبة', ...swalTheme() }); return; }
   if (!isValidCoord(lat, lng)) { Swal.fire({ icon: 'error', title: 'إحداثيات غير صحيحة', text: 'تأكد من خط العرض والطول', ...swalTheme() }); return; }
+  var latFixed = Number(lat).toFixed(6);
+  var lngFixed = Number(lng).toFixed(6);
+  var safeRange = Math.max(10, Math.min(5000, range));
+  setGpsInputs(latFixed, lngFixed, safeRange);
+  previewGpsMap({ source: 'save', force: true });
   appSettings.gpsName = name;
-  appSettings.gpsLat = lat;
-  appSettings.gpsLng = lng;
-  appSettings.gpsRange = Math.max(10, Math.min(5000, range));
+  appSettings.gpsLat = latFixed;
+  appSettings.gpsLng = lngFixed;
+  appSettings.gpsRange = safeRange;
   logActivity('edit', 'settings', 'تعديل إعدادات GPS: ' + name, { deferSave: true });
   commitAppSettingsToCloud().then(function (cloud) {
     if (cloud.ok) {
       Swal.fire({ icon: 'success', title: 'تم الحفظ', text: 'تم حفظ موقع الشركة في السحابة — نطاق: ' + appSettings.gpsRange + ' م', ...swalTheme(), timer: 2200, showConfirmButton: false });
     } else {
-      Swal.fire({ icon: 'warning', title: 'تم الحفظ محلياً', html: 'لم يُرفع للسحابة — أعد تسجيل الدخول.', ...swalTheme() });
+      Swal.fire({ icon: 'error', title: 'لم يتم الحفظ', html: 'تعذّر حفظ موقع الشركة في السحابة.<br>تحقق من الإنترنت أو أعد تسجيل الدخول ثم حاول مرة أخرى.', ...swalTheme() });
     }
   });
 }
@@ -1862,19 +2634,71 @@ function resetAllData() {
 /* ===== Device Fingerprint System ===== */
 const DEVICE_FP_KEY = 'basma_device_fp';
 
+function randomDeviceFingerprint() {
+  var bytes = new Uint8Array(18);
+  if (window.crypto && window.crypto.getRandomValues) {
+    window.crypto.getRandomValues(bytes);
+  } else {
+    for (var i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  var chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  var out = 'DEVU-';
+  bytes.forEach(function (b) { out += chars[b % chars.length]; });
+  return out;
+}
+
+function legacyDeviceFingerprint() {
+  var raw = [
+    navigator.userAgent || '',
+    navigator.platform || '',
+    navigator.language || '',
+    (Intl.DateTimeFormat().resolvedOptions().timeZone || ''),
+    (screen && screen.width && screen.height ? (screen.width + 'x' + screen.height + 'x' + (screen.colorDepth || '')) : '')
+  ].join('|');
+  var hash = 0;
+  for (var i = 0; i < raw.length; i++) {
+    hash = ((hash << 5) - hash) + raw.charCodeAt(i);
+    hash |= 0;
+  }
+  return 'DEV-' + Math.abs(hash).toString(36).toUpperCase();
+}
+
 function getDeviceFingerprint() {
   if (window.__basmaDeviceFp) return window.__basmaDeviceFp;
   try {
-    var fp = localStorage.getItem(DEVICE_FP_KEY);
-  if (!fp) {
-    fp = 'DEV-' + Date.now().toString(36).toUpperCase() + '-' + Math.random().toString(36).substring(2, 8).toUpperCase();
-      try { localStorage.setItem(DEVICE_FP_KEY, fp); } catch (e) { window.__basmaDeviceFp = fp; }
-  }
-  return fp;
-  } catch (e) {
-    window.__basmaDeviceFp = 'DEV-MEM-' + Date.now().toString(36).toUpperCase() + '-' + Math.random().toString(36).substring(2, 8).toUpperCase();
+    var stored = localStorage.getItem(DEVICE_FP_KEY);
+    if (stored && /^DEVU-[0-9A-Z]{12,}$/i.test(stored)) {
+      window.__basmaDeviceFp = stored.toUpperCase();
+      return window.__basmaDeviceFp;
+    }
+    if (stored && /^DEV-[0-9A-Z]{4,}$/i.test(stored)) {
+      window.__basmaDeviceFp = stored.toUpperCase();
+      return window.__basmaDeviceFp;
+    }
+  } catch (e) { /* ignore */ }
+
+  // جلسات الموظفين القديمة تبقى على البصمة القديمة حتى لا ينقطع دخولهم بعد التحديث.
+  if (typeof hasActiveEmployeeSession === 'function' && hasActiveEmployeeSession()) {
+    window.__basmaDeviceFp = legacyDeviceFingerprint();
+    try { localStorage.setItem(DEVICE_FP_KEY, window.__basmaDeviceFp); } catch (e3) { /* ignore */ }
     return window.__basmaDeviceFp;
   }
+
+  window.__basmaDeviceFp = randomDeviceFingerprint();
+  try { localStorage.setItem(DEVICE_FP_KEY, window.__basmaDeviceFp); } catch (e2) { /* ignore */ }
+  return window.__basmaDeviceFp;
+}
+
+function withClientTimeout(promise, ms, label) {
+  var timeoutMs = Math.max(1000, parseInt(ms, 10) || 12000);
+  return Promise.race([
+    promise,
+    new Promise(function (_, reject) {
+      setTimeout(function () {
+        reject(new Error((label || 'operation') + '_timeout'));
+      }, timeoutMs);
+    })
+  ]);
 }
 
 function generatePin() {
@@ -2200,26 +3024,24 @@ async function refreshLoggedInEmployeeFromServer() {
 }
 
 function resetEmployeeCheckInStateFromAttendance(empId) {
-  var todayRec = (attData || []).find(function (r) {
-    return r && r.empId === empId && isAttendanceRecordToday(r);
-  });
-  if (!todayRec || !todayRec.ci || todayRec.ci === '—') {
+  var openRec = findOpenAttendanceRecord(empId, false);
+  if (!openRec || !openRec.ci || openRec.ci === '—' || (openRec.co && openRec.co !== '—')) {
     checkedIn = false;
     checkInTime = null;
     return;
   }
   checkedIn = true;
-  var now = new Date();
-  var parts = String(todayRec.ci).match(/(\d+):(\d+)\s*(AM|PM)/i);
+  var baseDate = openRec.dateIso ? new Date(openRec.dateIso + 'T12:00:00') : new Date();
+  var parts = String(openRec.ci).match(/(\d+):(\d+)\s*(AM|PM)/i);
   if (parts) {
     var ch = parseInt(parts[1], 10);
     var cm = parseInt(parts[2], 10);
     var cap = parts[3].toUpperCase();
     if (cap === 'PM' && ch !== 12) ch += 12;
     if (cap === 'AM' && ch === 12) ch = 0;
-    checkInTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), ch, cm);
+    checkInTime = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate(), ch, cm);
   } else {
-    checkInTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 8, 0);
+    checkInTime = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate(), 8, 0);
   }
 }
 
@@ -2287,6 +3109,46 @@ function dedupeEmployeeNotifications(arr) {
   return out;
 }
 
+function getEmpPortalAttendanceRows(emp, options) {
+  options = options || {};
+  if (!emp || !emp.id) return [];
+  var list = (attData || []).filter(function (r) {
+    return r && r.empId === emp.id && isPunchAttendanceRecord(r);
+  });
+  list.forEach(function (r) { ensureAttendanceRecordDates(r); });
+  list = list.filter(function (r) { return !!attendanceRecordIso(r); });
+  list.sort(function (a, b) {
+    return attendanceRecordIso(b).localeCompare(attendanceRecordIso(a));
+  });
+  var maxDays = options.days;
+  if (maxDays != null && maxDays > 0 && list.length > maxDays) list = list.slice(0, maxDays);
+  return list;
+}
+
+async function fetchAllEmployeeAttendanceFromCloud(empId, options) {
+  options = options || {};
+  if (!empId || typeof sb_fetchEmployeeAttendance !== 'function') return [];
+  var pageSize = options.pageSize || 500;
+  var offset = 0;
+  var all = [];
+  var guard = 0;
+  while (guard < 200) {
+    guard++;
+    var page = await sb_fetchEmployeeAttendance(empId, {
+      limit: pageSize,
+      offset: offset,
+      fingerprint: options.fingerprint,
+      token: options.token,
+      slot: options.slot
+    });
+    if (!page || !page.length) break;
+    all = all.concat(page);
+    if (page.length < pageSize) break;
+    offset += page.length;
+  }
+  return all;
+}
+
 async function refreshLoggedInEmployeeAttendance(options) {
   options = options || {};
   var empId = parseInt(window.loggedInEmpId || '0', 10);
@@ -2296,15 +3158,51 @@ async function refreshLoggedInEmployeeAttendance(options) {
     if (!r || r.empId !== empId) return false;
     return r._pendingRemoteSync || (r._localAttEditAt && (Date.now() - r._localAttEditAt) < 300000);
   });
-  var rows = await sb_fetchEmployeeAttendance(empId, { limit: options.limit || 120 });
-  if (!rows) return false;
-  attData = (attData || []).filter(function (r) { return !r || r.empId !== empId; });
-  rows.forEach(function (r) { attData.push(r); });
-  localPending.forEach(function (local) {
-    var key = attendanceRecordKey(local);
-    var exists = (attData || []).some(function (r) { return r && attendanceRecordKey(r) === key; });
-    if (!exists) attData.push(local);
+  var existingForEmp = (attData || []).filter(function (r) {
+    return r && r.empId === empId;
   });
+  var rows = typeof fetchAllEmployeeAttendanceFromCloud === 'function'
+    ? await fetchAllEmployeeAttendanceFromCloud(empId, options)
+    : await sb_fetchEmployeeAttendance(empId, { limit: 5000, offset: 0 });
+  if (rows == null) return false;
+  if (!Array.isArray(rows)) rows = [];
+  if (rows.length === 0 && existingForEmp.length > 0) {
+    var hasMeaningfulLocal = existingForEmp.some(function (r) {
+      if (!r) return false;
+      if (r._pendingRemoteSync || r._localAttEditAt) return true;
+      if (r.ci && r.ci !== '—') return true;
+      if (r.co && r.co !== '—') return true;
+      return false;
+    });
+    if (hasMeaningfulLocal) {
+      if (typeof normalizeAttendanceStore === 'function') normalizeAttendanceStore();
+      resetEmployeeCheckInStateFromAttendance(empId);
+      if (typeof saveData === 'function') saveData();
+      return true;
+    }
+  }
+  var byKey = {};
+  existingForEmp.forEach(function (r) {
+    ensureAttendanceRecordDates(r);
+    var k = attendanceRecordKey(r);
+    if (k) byKey[k] = r;
+  });
+  rows.forEach(function (r) {
+    ensureAttendanceRecordDates(r);
+    var k = attendanceRecordKey(r);
+    if (!k) return;
+    var prev = byKey[k];
+    if (!prev || attendanceRecordRank(r) > attendanceRecordRank(prev)) byKey[k] = r;
+  });
+  localPending.forEach(function (local) {
+    ensureAttendanceRecordDates(local);
+    var k = attendanceRecordKey(local);
+    if (!k) return;
+    var prev = byKey[k];
+    if (!prev || attendanceRecordRank(local) > attendanceRecordRank(prev)) byKey[k] = local;
+  });
+  attData = (attData || []).filter(function (r) { return !r || r.empId !== empId; });
+  Object.keys(byKey).forEach(function (k) { attData.push(byKey[k]); });
   if (typeof normalizeAttendanceStore === 'function') normalizeAttendanceStore();
   resetEmployeeCheckInStateFromAttendance(empId);
   if (typeof saveData === 'function') saveData();
@@ -2315,7 +3213,12 @@ function mergeEmployeeNotificationsForEmp(empId, remoteArr) {
   ensureNotifStores();
   empId = parseInt(empId, 10);
   if (!empId) return false;
-  var remote = dedupeEmployeeNotifications((remoteArr || []).filter(function (n) { return n && String(n.empId) === String(empId); }));
+  var remote = dedupeEmployeeNotifications((remoteArr || []).filter(function (n) {
+    if (!n || String(n.empId) !== String(empId)) return false;
+    var empCid = typeof getLoggedInEmployeeCompanyId === 'function' ? getLoggedInEmployeeCompanyId() : null;
+    if (empCid && n.companyId != null && parseInt(n.companyId, 10) !== empCid) return false;
+    return true;
+  }));
   if (!remote.length) return false;
   var other = (appSettings.employeeNotifications || []).filter(function (n) { return n && String(n.empId) !== String(empId); });
   var local = (appSettings.employeeNotifications || []).filter(function (n) { return n && String(n.empId) === String(empId); });
@@ -2330,7 +3233,8 @@ function mergeEmployeeNotificationsForEmp(empId, remoteArr) {
   var merged = remote.map(function (r) {
     var l = localMap[employeeNotificationKey(r)] || localSigMap[employeeNotificationSignature(r)];
     if (!l) return r;
-    var isRead = l.read === true || r.read === true || l.unread === false || r.unread === false;
+    var dismissed = typeof isEmployeeFinanceRailDismissed === 'function' && isEmployeeFinanceRailDismissed(l);
+    var isRead = dismissed || l.read === true || r.read === true || l.unread === false || r.unread === false;
     return Object.assign({}, r, {
       read: isRead,
       unread: !isRead,
@@ -2413,7 +3317,14 @@ var _employeePortalPollTimer = null;
 
 function startEmployeePortalPolling() {
   if (_employeePortalPollTimer) clearInterval(_employeePortalPollTimer);
+  if (window._broadcastReShowTimer) clearInterval(window._broadcastReShowTimer);
+  window._broadcastReShowTimer = null;
   if (currentUser !== 'emp' || !window.loggedInEmpId) return;
+  if (typeof renderEmployeeBroadcastRail === 'function') { try { renderEmployeeBroadcastRail(); } catch (e) { /* ignore */ } }
+  window._broadcastReShowTimer = setInterval(function () {
+    if (currentUser !== 'emp' || !window.loggedInEmpId || document.hidden) return;
+    if (typeof renderEmployeeBroadcastRail === 'function') { try { renderEmployeeBroadcastRail(); } catch (e) { /* ignore */ } }
+  }, 20000);
   _employeePortalPollTimer = setInterval(function () {
     if (currentUser !== 'emp' || !window.loggedInEmpId || document.hidden) return;
     var tasks = [];
@@ -2421,7 +3332,7 @@ function startEmployeePortalPolling() {
       tasks.push(refreshLoggedInEmployeeFromServer().catch(function (e) { console.warn('employee poll profile:', e); }));
     }
     if (typeof refreshLoggedInEmployeeAttendance === 'function') {
-      tasks.push(refreshLoggedInEmployeeAttendance({ limit: 120 }).catch(function (e) { console.warn('employee poll attendance:', e); }));
+      tasks.push(refreshLoggedInEmployeeAttendance().catch(function (e) { console.warn('employee poll attendance:', e); }));
     }
     if (typeof refreshLoggedInEmployeeNotifications === 'function') {
       tasks.push(refreshLoggedInEmployeeNotifications({ limit: 100 }).catch(function (e) { console.warn('employee poll notifications:', e); }));
@@ -2435,8 +3346,8 @@ function startEmployeePortalPolling() {
     Promise.all(tasks).then(function () {
       if (typeof buildEmpPortal === 'function') buildEmpPortal({ skipSubscriptionRefresh: true });
       if (typeof buildEmployeeLeaveNotifs === 'function') buildEmployeeLeaveNotifs(window.loggedInEmpId);
-      if (typeof renderEmployeeFinanceNotificationsRail === 'function') renderEmployeeFinanceNotificationsRail();
       if (typeof updateNotifBadges === 'function') updateNotifBadges();
+      if (typeof renderEmployeeBroadcastRail === 'function') renderEmployeeBroadcastRail();
     });
   }, 15000);
 }
@@ -2444,12 +3355,16 @@ function startEmployeePortalPolling() {
 function stopEmployeePortalPolling() {
   if (_employeePortalPollTimer) clearInterval(_employeePortalPollTimer);
   _employeePortalPollTimer = null;
+  if (window._broadcastReShowTimer) clearInterval(window._broadcastReShowTimer);
+  window._broadcastReShowTimer = null;
 }
 
 function clearAdminSessionForEmployeeClient() {
   if (typeof clearAdminSession === 'function') clearAdminSession();
   saasCurrentUser = null;
   window._saasCurrentUser = null;
+  if (typeof setSubscriptionStatus === 'function') setSubscriptionStatus(null);
+  else window._subscriptionStatus = null;
   if (typeof AuthApi !== 'undefined' && AuthApi.clearSupabaseSession) {
     AuthApi.clearSupabaseSession().catch(function () {});
   }
@@ -2458,6 +3373,15 @@ function clearAdminSessionForEmployeeClient() {
 async function doPhoneRegistration() {
   const result = document.getElementById('phone-reg-result');
   try {
+    var activeClosure = officialClosureForDate();
+    if (activeClosure) {
+      if (result) {
+        result.style.cssText = 'display:block;padding:14px;border-radius:12px;background:rgba(128,90,213,0.14);border:1px solid rgba(128,90,213,0.35);color:#d6bcfa;font-size:13px;font-weight:700';
+        result.textContent = 'الرابط معطل حالياً بسبب: ' + activeClosure.title + ' (' + activeClosure.startDate + ' إلى ' + activeClosure.endDate + ')';
+      }
+      return;
+    }
+    beginQrRegistrationContext();
     const codeInp = document.getElementById('phone-reg-code');
     if (!codeInp || !result) return;
     const code = normalizeRegistrationLinkInput(codeInp.value.trim());
@@ -2477,7 +3401,7 @@ async function doPhoneRegistration() {
     result.textContent = 'جارٍ التحقق من QR في السحابة...';
 
     if (typeof initSupabase === 'function') initSupabase();
-    if (typeof ensureSupabaseClient === 'function') await ensureSupabaseClient(12);
+    if (typeof ensureSupabaseClient === 'function') await withClientTimeout(ensureSupabaseClient(12), 14000, 'supabase_connect');
 
     var empList = window.employees || [];
     let emp = null;
@@ -2485,11 +3409,11 @@ async function doPhoneRegistration() {
     var resolveErr = '';
 
     if (typeof sb_resolveQrRegistration === 'function') {
-      const resolved = await sb_resolveQrRegistration({
+      const resolved = await withClientTimeout(sb_resolveQrRegistration({
         token: parsed.token || null,
         empId: parsed.empId || null,
         slot: parsed.slot || null
-      });
+      }), 14000, 'qr_resolve');
       if (resolved.ok && resolved.data) {
         const merged = mergeRegistrationLookupIntoEmployees(resolved.data);
         if (merged) {
@@ -2503,12 +3427,12 @@ async function doPhoneRegistration() {
         }
       } else {
         resolveErr = resolved.error || 'not_found';
-        if (resolveErr === 'token_not_found' && parsed.empId && parsed.slot) {
-          const resolvedSlot = await sb_resolveQrRegistration({
+        if (!parsed.token && resolveErr === 'token_not_found' && parsed.empId && parsed.slot) {
+          const resolvedSlot = await withClientTimeout(sb_resolveQrRegistration({
             empId: parsed.empId,
             slot: parsed.slot,
             token: parsed.token || null
-          });
+          }), 14000, 'qr_resolve_slot');
           if (resolvedSlot.ok && resolvedSlot.data) {
             const mergedSlot = mergeRegistrationLookupIntoEmployees(resolvedSlot.data);
             if (mergedSlot) {
@@ -2521,18 +3445,28 @@ async function doPhoneRegistration() {
       }
     }
 
+    if (parsed.token && resolveErr && (!emp || !dev)) {
+      result.style.cssText = 'display:block;padding:14px;border-radius:12px;background:rgba(229,62,62,0.12);border:1px solid rgba(229,62,62,0.35);color:#fc8181;font-size:13px;font-weight:700';
+      if (resolveErr === 'token_not_found' || resolveErr === 'not_found') {
+        result.innerHTML = 'رمز QR غير موجود في السحابة<br><span style="font-size:11px;color:rgba(232,244,253,0.65)">افتح «عرض QR» من لوحة الإدارة وانتظر «QR جاهز»، ثم امسح QR جديداً. لن يتم استخدام بيانات محفوظة سابقاً على هذا الهاتف.</span>';
+      } else {
+        result.innerHTML = 'تعذّر التحقق من QR في السحابة<br><span style="font-size:11px;color:rgba(232,244,253,0.65)">' + esc(describeSupabaseSaveError(resolveErr)) + '</span>';
+      }
+      return;
+    }
+
     if (!emp || !dev) {
-    let target = parsed.token ? findDeviceByToken(parsed.token) : null;
-      emp = target?.emp || (parsed.empId ? empList.find(e => e.id === parsed.empId) : null);
-      dev = target?.dev || (emp && parsed.slot ? getDevice(emp, parsed.slot) : null);
+      // لا نستخدم أي تطابق محلي قبل الرجوع للسحابة، حتى لا يظهر موظف قديم محفوظ على الهاتف.
+      emp = null;
+      dev = null;
     }
 
     if ((!emp || !dev) && typeof sb_lookupDeviceRegistration === 'function') {
-      const lookup = await sb_lookupDeviceRegistration({
+      const lookup = await withClientTimeout(sb_lookupDeviceRegistration({
         token: parsed.token || null,
         empId: parsed.empId || null,
         slot: parsed.slot || null
-      });
+      }), 14000, 'qr_lookup');
       if (lookup && lookup.employee_id) {
         const merged = mergeRegistrationLookupIntoEmployees(lookup);
         if (merged) {
@@ -2547,7 +3481,7 @@ async function doPhoneRegistration() {
     if ((!emp || !dev) && typeof syncFromSupabase === 'function') {
       result.textContent = 'جارٍ مزامنة بيانات الموظف...';
       try {
-        await syncFromSupabase({ keepDisableAutoSync: true });
+        await withClientTimeout(syncFromSupabase({ keepDisableAutoSync: true }), 16000, 'employee_sync');
         empList = window.employees || [];
         var target2 = parsed.token ? findDeviceByToken(parsed.token) : null;
         emp = target2?.emp || (parsed.empId ? empList.find(e => e.id === parsed.empId) : null);
@@ -2585,21 +3519,21 @@ async function doPhoneRegistration() {
     }
 
     const fp = getDeviceFingerprint();
-    const ip = await fetchClientIp().catch(function () { return ''; });
+    const ip = await withClientTimeout(fetchClientIp(), 7000, 'ip_lookup').catch(function () { return ''; });
 
     if (!parsed.token && dev.token) parsed.token = dev.token;
     const linkToken = parsed.token || dev.token || null;
 
     if (typeof sb_linkDeviceByToken === 'function' && (linkToken || (parsed.empId && parsed.slot))) {
       result.textContent = 'جارٍ ربط الجهاز في السحابة...';
-      const remoteLink = await sb_linkDeviceByToken(
+      const remoteLink = await withClientTimeout(sb_linkDeviceByToken(
         linkToken,
         fp,
         ip,
         getDeviceInfo(),
         parsed.empId || emp.id,
         parsed.slot || dev.slot
-      );
+      ), 14000, 'device_link');
       if (remoteLink && remoteLink.ok === true) {
         dev.fingerprint = remoteLink.fingerprint || fp;
         dev.ip = remoteLink.ip || ip || dev.ip || '';
@@ -2618,10 +3552,35 @@ async function doPhoneRegistration() {
           }
         }
       } else if (remoteLink && remoteLink.ok === false) {
-        if (remoteLink.error === 'device_already_linked') {
-          result.style.cssText = 'display:block;padding:14px;border-radius:12px;background:rgba(229,62,62,0.12);border:1px solid rgba(229,62,62,0.35);color:#fc8181;font-size:13px;font-weight:700';
-          result.textContent = 'هذا QR مرتبط بجهاز آخر مسبقاً';
+        if (remoteLink.error === 'official_closure_active') {
+          result.style.cssText = 'display:block;padding:14px;border-radius:12px;background:rgba(128,90,213,0.14);border:1px solid rgba(128,90,213,0.35);color:#d6bcfa;font-size:13px;font-weight:700';
+          result.textContent = 'الرابط معطل حالياً بسبب عطلة رسمية للشركة';
           return;
+        }
+        if (remoteLink.error === 'device_already_linked') {
+          if (typeof sb_adoptBrowserFingerprint === 'function') {
+            var adoptRetry = await sb_adoptBrowserFingerprint(fp, ip, {
+              token: linkToken,
+              employeeId: parsed.empId || (emp && emp.id) || null,
+              slot: parsed.slot || (dev && dev.slot) || null
+            });
+            if (adoptRetry && adoptRetry.ok === true) {
+              remoteLink = {
+                ok: true,
+                employee_id: adoptRetry.employee_id,
+                slot: adoptRetry.slot,
+                emp_name: adoptRetry.emp_name,
+                fingerprint: fp,
+                ip: ip,
+                multi_browser: adoptRetry.multi_browser === true
+              };
+            }
+          }
+          if (!remoteLink || remoteLink.ok !== true) {
+            result.style.cssText = 'display:block;padding:14px;border-radius:12px;background:rgba(229,62,62,0.12);border:1px solid rgba(229,62,62,0.35);color:#fc8181;font-size:13px;font-weight:700';
+            result.textContent = 'تعذّر ربط هذا المتصفح — أعد مسح QR من لوحة الإدارة';
+            return;
+          }
         }
         if (remoteLink.error === 'not_found' || remoteLink.error === 'invalid_token') {
           result.style.cssText = 'display:block;padding:14px;border-radius:12px;background:rgba(229,62,62,0.12);border:1px solid rgba(229,62,62,0.35);color:#fc8181;font-size:13px;font-weight:700';
@@ -2633,9 +3592,12 @@ async function doPhoneRegistration() {
           result.textContent = 'تعذّر إنشاء بصمة الجهاز — حدّث الصفحة وحاول مرة أخرى';
           return;
         }
+        result.style.cssText = 'display:block;padding:14px;border-radius:12px;background:rgba(229,62,62,0.12);border:1px solid rgba(229,62,62,0.35);color:#fc8181;font-size:13px;font-weight:700;line-height:1.8';
+        result.innerHTML = 'تعذّر ربط الجهاز في السحابة<br><span style="font-size:11px;color:rgba(232,244,253,0.65)">' + esc(describeDeviceLinkError(remoteLink)) + '</span>';
+        return;
       } else {
         result.style.cssText = 'display:block;padding:14px;border-radius:12px;background:rgba(229,62,62,0.12);border:1px solid rgba(229,62,62,0.35);color:#fc8181;font-size:13px;font-weight:700';
-        result.innerHTML = 'تعذّر الاتصال بالسحابة لتسجيل البصمة<br><span style="font-size:11px;color:rgba(232,244,253,0.65)">تحقق من الإنترنت على الهاتف ثم أعد مسح QR</span>';
+        result.innerHTML = 'تعذّر ربط الجهاز في السحابة<br><span style="font-size:11px;color:rgba(232,244,253,0.65)">خدمة الربط لم تُرجع نتيجة واضحة — حدّث الصفحة ثم أعد مسح QR.</span>';
         return;
       }
     }
@@ -2647,18 +3609,35 @@ async function doPhoneRegistration() {
       return;
     }
     ensureEmployeeTenantContext(emp);
+    if (!employees.some(function (e) { return e && e.id === emp.id; })) {
+      employees.push(emp);
+      window.employees = employees;
+    }
     emp._freshDevices = true;
     if (typeof saveData === 'function') saveData();
 
     currentUser = 'emp';
     window.loggedInEmpId = emp.id;
+    if (typeof clearAdminSessionForEmployeeClient === 'function') clearAdminSessionForEmployeeClient();
+    if (typeof refreshEmployeeSubscriptionForEmp === 'function') {
+      try { await refreshEmployeeSubscriptionForEmp(emp); } catch (e) {
+        console.warn('doPhoneRegistration subscription refresh:', e);
+      }
+    }
     result.style.cssText = 'display:block;padding:14px;border-radius:12px;background:rgba(56,161,105,0.12);border:1px solid rgba(56,161,105,0.35);color:#68d391;font-size:14px;font-weight:700;line-height:1.8';
     result.innerHTML = 'تم ربط الهاتف بنجاح<br>' +
       '<span style="font-size:13px;color:#e8f4fd">' + esc(emp.name) + ' - ' + esc(dev.label) + '</span><br>' +
       '<span style="font-size:11px;color:rgba(232,244,253,0.5);direction:ltr;display:block;margin-top:4px">IP: ' + esc(ip || 'غير متاح') + '</span>' +
       '<span style="font-size:11px;color:rgba(232,244,253,0.5);direction:ltr;display:block;margin-top:4px">Fingerprint: ' + esc(fp) + '</span>';
+    try {
+      history.replaceState({}, '', window.location.pathname + window.location.hash);
+    } catch (e) { /* ignore */ }
     setTimeout(function () {
-      try { closePhoneRegistration(); launchApp(); } catch (e) { console.warn('launchApp after phone reg:', e); }
+      try {
+        window.__basmaQrRegistrationInProgress = false;
+        closePhoneRegistration();
+        launchApp();
+      } catch (e) { console.warn('launchApp after phone reg:', e); }
     }, 900);
   } catch (e) {
     console.error('doPhoneRegistration error:', e);
@@ -2667,6 +3646,8 @@ async function doPhoneRegistration() {
       var detail = (e && e.message) ? String(e.message) : '';
       if (/localStorage|QuotaExceeded|SecurityError/i.test(detail)) {
         result.innerHTML = 'تعذّر حفظ بيانات الجهاز محلياً<br><span style="font-size:11px;color:rgba(232,244,253,0.65)">أغلق وضع التصفح الخاص أو اسمح بالتخزين للموقع ثم أعد مسح QR</span>';
+      } else if (/_timeout$/i.test(detail)) {
+        result.innerHTML = 'انتهت مهلة التحقق من الجهاز<br><span style="font-size:11px;color:rgba(232,244,253,0.65)">تحقق من الإنترنت ثم حدّث الصفحة أو أعد مسح QR. إذا استمرت المشكلة افتح قيد المحاولات من إدارة بصمة الأجهزة.</span>';
       } else {
         result.textContent = 'حدث خطأ أثناء ربط الجهاز: ' + (detail || 'حاول مرة أخرى');
       }
@@ -2818,6 +3799,8 @@ function normalizeEmployee(e) {
   e.openHours = e.openHours === true;
   e.remoteAttend = e.remoteAttend === true;
   if (e.salDeletedPeriod === undefined) e.salDeletedPeriod = '';
+  e.hireDate = e.hireDate ? String(e.hireDate).slice(0, 10) : '';
+  e.active = e.active !== false;
   if (!e.devices) {
     e.devices = [
       { slot: 1, label: 'الهاتف الأول', ip: '', fingerprint: '', pin: '', barcode: genBarcode(e.id, 1), token: '', deviceInfo: null, linked_at: '', last_login: '' },
@@ -3229,6 +4212,27 @@ function showEmployeeBarcodes(id) {
     } });
 }
 
+function hasQrRegistrationParams() {
+  try {
+    var rawSearch = String(window.location.search || '');
+    rawSearch = rawSearch.replace(/\u00AE=/gi, '&code=').replace(/®=/gi, '&code=').replace(/&reg=/gi, '&code=');
+    var params = new URLSearchParams(rawSearch);
+    return !!(params.get('token') || params.get('code') || params.get('reg') || params.get('pin'));
+  } catch (e) {
+    return false;
+  }
+}
+
+function beginQrRegistrationContext() {
+  window.__basmaQrRegistrationInProgress = true;
+  currentUser = null;
+  window.loggedInEmpId = null;
+  checkedIn = false;
+  checkInTime = null;
+  if (typeof clearRegisteredDeviceCache === 'function') clearRegisteredDeviceCache();
+  window.__basmaDeviceFp = null;
+}
+
 async function checkQrRegisterFromUrl() {
   try {
     var rawSearch = window.location.search || '';
@@ -3238,11 +4242,13 @@ async function checkQrRegisterFromUrl() {
     const reg = params.get('code') || params.get('reg');
     const pin = params.get('pin');
     if (!token && !reg && !pin) return false;
+    beginQrRegistrationContext();
     if (token) {
       var tokClean = String(token).match(/^(REG_[A-Za-z0-9]{10,})/i);
       if (tokClean) token = tokClean[1];
     }
-    if (typeof loadData === 'function') loadData();
+    // لا نحمّل بيانات الموظفين المحلية هنا حتى لا يلتقط الهاتف موظفاً قديماً محفوظاً في المتصفح.
+    window.employees = [];
     ensureEmployeesArray();
     // Clean URL before showing overlay (prevents re-trigger on reload)
     history.replaceState({}, '', window.location.pathname + window.location.hash);
@@ -3266,22 +4272,70 @@ async function checkQrRegisterFromUrl() {
   }
 }
 
+var EMP_DEVICE_SESSION_KEY = 'basma_emp_device_session';
+
+function restoreEmployeeDeviceSession() {
+  if (window.__basmaEmpSession && window.__basmaEmpSession.active && window.__basmaEmpSession.empId) {
+    return window.__basmaEmpSession;
+  }
+  try {
+    var raw = localStorage.getItem(EMP_DEVICE_SESSION_KEY) || sessionStorage.getItem(EMP_DEVICE_SESSION_KEY);
+    if (!raw) return null;
+    var parsed = JSON.parse(raw);
+    if (!parsed || !parsed.empId) return null;
+    window.__basmaEmpSession = {
+      empId: parseInt(parsed.empId, 10) || null,
+      slot: parseInt(parsed.slot, 10) || 1,
+      companyId: parsed.companyId != null ? parseInt(parsed.companyId, 10) : null,
+      fingerprint: parsed.fingerprint || null,
+      active: true
+    };
+    if (parsed.fingerprint && /^DEVU?-/i.test(parsed.fingerprint)) {
+      window.__basmaDeviceFp = String(parsed.fingerprint).toUpperCase();
+      try { localStorage.setItem(DEVICE_FP_KEY, window.__basmaDeviceFp); } catch (e2) { /* ignore */ }
+    }
+    return window.__basmaEmpSession;
+  } catch (e) {
+    return null;
+  }
+}
+
+function getCachedEmployeeSessionIds() {
+  restoreEmployeeDeviceSession();
+  var s = window.__basmaEmpSession;
+  return {
+    empId: s ? (parseInt(s.empId || '0', 10) || 0) : 0,
+    slot: s ? (parseInt(s.slot || '0', 10) || 1) : 1,
+    companyId: s && s.companyId != null ? (parseInt(s.companyId, 10) || 0) : 0,
+    fingerprint: s && s.fingerprint ? s.fingerprint : ''
+  };
+}
+
 function clearRegisteredDeviceCache() {
-  localStorage.removeItem('basma_registered_emp');
-  localStorage.removeItem('basma_registered_slot');
-  localStorage.removeItem('basma_emp_session');
+  window.__basmaEmpSession = null;
+  _empFinanceRailRenderSig = '';
+  window.__basmaEmpPortalBannerMsg = '';
+  try {
+    localStorage.removeItem(EMP_DEVICE_SESSION_KEY);
+    sessionStorage.removeItem(EMP_DEVICE_SESSION_KEY);
+    localStorage.removeItem('basma_registered_emp');
+    localStorage.removeItem('basma_registered_slot');
+    localStorage.removeItem('basma_emp_session');
+    localStorage.removeItem('basma_employee_company_id');
+  } catch (e) { /* ignore */ }
 }
 
 function ensureEmployeeTenantContext(emp) {
   if (!emp || emp.company_id == null) return false;
   var cid = parseInt(emp.company_id, 10);
   if (!cid || cid <= 0) return false;
-  try { localStorage.setItem('basma_employee_company_id', String(cid)); } catch (e) {}
-  if (typeof switchTenantDataStore === 'function' && window.__basmaActiveCompanyId !== cid) {
+  if (window.__basmaActiveCompanyId === cid) return true;
+  window.__basmaActiveCompanyId = cid;
+  if (window.__basmaCloudOnlyStorage) return true;
+  if (typeof switchTenantDataStore === 'function') {
     switchTenantDataStore(cid, { savePrevious: true, resetSettings: false, skipLegacyMigrate: true });
-  } else if (window.__basmaActiveCompanyId !== cid) {
-    window.__basmaActiveCompanyId = cid;
-    if (typeof loadData === 'function') loadData();
+  } else if (typeof loadData === 'function') {
+    loadData();
     if (typeof filterLocalDataByCompany === 'function') filterLocalDataByCompany(cid);
   }
   return true;
@@ -3315,19 +4369,42 @@ async function ensureEmployeeFromServerAccess(empId, slot, fp, prof) {
   return emp;
 }
 
-function markEmployeeSessionActive(empId, slot) {
-  try {
-  if (empId) localStorage.setItem('basma_registered_emp', String(empId));
-  if (slot) localStorage.setItem('basma_registered_slot', String(slot));
-  localStorage.setItem('basma_emp_session', '1');
-  } catch (e) {
-    window.__basmaEmpSession = { empId: empId, slot: slot, active: true };
+function markEmployeeSessionActive(empId, slot, companyId) {
+  empId = parseInt(empId, 10) || null;
+  slot = parseInt(slot, 10) || 1;
+  if (!companyId) {
+    var localEmp = (window.employees || []).find(function (e) { return e && e.id === empId; });
+    if (localEmp && localEmp.company_id != null) companyId = parseInt(localEmp.company_id, 10);
+  } else {
+    companyId = parseInt(companyId, 10) || null;
   }
+  var fp = window.__basmaDeviceFp || '';
+  try {
+    if (!fp && typeof getDeviceFingerprint === 'function') fp = getDeviceFingerprint();
+  } catch (e0) { fp = fp || ''; }
+  if (fp) {
+    fp = String(fp).toUpperCase();
+    window.__basmaDeviceFp = fp;
+  }
+  window.__basmaEmpSession = { empId: empId, slot: slot, companyId: companyId || null, fingerprint: fp || null, active: true };
+  try {
+    var payload = JSON.stringify({
+      empId: empId,
+      slot: slot,
+      companyId: companyId || null,
+      fingerprint: fp || null,
+      ts: Date.now()
+    });
+    localStorage.setItem(EMP_DEVICE_SESSION_KEY, payload);
+    sessionStorage.setItem(EMP_DEVICE_SESSION_KEY, payload);
+    if (fp) localStorage.setItem(DEVICE_FP_KEY, fp);
+    localStorage.setItem('basma_registered_emp', String(empId || ''));
+    localStorage.setItem('basma_registered_slot', String(slot || 1));
+  } catch (e) { /* ignore */ }
 }
 
 function hasActiveEmployeeSession() {
-  return localStorage.getItem('basma_emp_session') === '1' &&
-    !!parseInt(localStorage.getItem('basma_registered_emp') || '0', 10);
+  return !!(window.__basmaEmpSession && window.__basmaEmpSession.active && window.__basmaEmpSession.empId);
 }
 
 function mergeLocalPendingEmployees(remoteEmps) {
@@ -3371,9 +4448,123 @@ function mergeLocalPendingAttendance(remoteAtts, mergedEmployees) {
   return dedupeAttendanceRecords(merged);
 }
 
+async function refreshEmployeeSubscriptionForEmp(emp) {
+  if (!emp) return null;
+  var cid = emp.company_id != null ? parseInt(emp.company_id, 10) : 0;
+  if (!cid || typeof sb_checkSubscriptionStatus !== 'function') return null;
+  try {
+    var st = await sb_checkSubscriptionStatus(cid);
+    if (st && typeof st === 'object') st._companyId = cid;
+    if (typeof setSubscriptionStatus === 'function') setSubscriptionStatus(st);
+    else { window._subscriptionStatus = st; }
+    return st;
+  } catch (e) {
+    console.warn('refreshEmployeeSubscriptionForEmp:', e);
+    return null;
+  }
+}
+
+async function tryAutoAdoptBrowserFingerprint(fp, ip, options) {
+  options = options || {};
+  if (!fp || typeof sb_adoptBrowserFingerprint !== 'function') return null;
+  var cached = typeof getCachedEmployeeSessionIds === 'function'
+    ? getCachedEmployeeSessionIds()
+    : { empId: 0, slot: 1, companyId: 0 };
+  var token = options.token || null;
+  if (!token && cached.empId) {
+    var empLocal = (typeof employees !== 'undefined' ? employees : []).find(function (e) {
+      return e && e.id === cached.empId;
+    });
+    if (empLocal && typeof getDevice === 'function') {
+      var devTok = getDevice(empLocal, options.slot || cached.slot);
+      if (devTok && devTok.token) token = devTok.token;
+    }
+  }
+  var attempts = [];
+  if (token) {
+    attempts.push({ token: token, employeeId: options.employeeId || cached.empId || null, slot: options.slot || cached.slot || null });
+  }
+  if (cached.empId && cached.slot) {
+    attempts.push({ employeeId: cached.empId, slot: cached.slot });
+  }
+  if (ip) attempts.push({});
+  for (var i = 0; i < attempts.length; i++) {
+    try {
+      var adoptOpts = attempts[i];
+      var adoptPromise = sb_adoptBrowserFingerprint(fp, ip, adoptOpts);
+      var adopt = typeof withClientTimeout === 'function'
+        ? await withClientTimeout(adoptPromise, 12000, 'browser_adopt')
+        : await adoptPromise;
+      if (adopt && adopt.ok === true) {
+        markEmployeeSessionActive(adopt.employee_id, adopt.slot || 1, adopt.company_id);
+        return adopt;
+      }
+    } catch (e) {
+      console.warn('tryAutoAdoptBrowserFingerprint:', e);
+    }
+  }
+  return null;
+}
+
+async function resolveRegisteredEmployeeFromServer(fp, ipRestrictOn) {
+  fp = fp || (typeof getDeviceFingerprint === 'function' ? getDeviceFingerprint() : '');
+  var cached = typeof getCachedEmployeeSessionIds === 'function'
+    ? getCachedEmployeeSessionIds()
+    : { empId: 0, slot: 1, companyId: 0 };
+  if (cached.empId && typeof sb_verifyEmployeeDeviceAccess === 'function') {
+    try {
+      var cachedAccess = await sb_verifyEmployeeDeviceAccess(cached.empId, { fingerprint: fp, slot: cached.slot });
+      if (cachedAccess && cachedAccess.ok === true && typeof ensureEmployeeFromServerAccess === 'function') {
+        return ensureEmployeeFromServerAccess(cached.empId, cached.slot, fp, cachedAccess);
+      }
+    } catch (e) {
+      console.warn('resolveRegisteredEmployeeFromServer cached:', e);
+    }
+  }
+  if (!ipRestrictOn || !fp || typeof sb_resolveEmployeeByFingerprint !== 'function') return null;
+  try {
+    var resolved = await sb_resolveEmployeeByFingerprint(fp);
+    if (!resolved || resolved.ok !== true || !resolved.employee_id) {
+      if (typeof tryAutoAdoptBrowserFingerprint === 'function') {
+        var adopted = await tryAutoAdoptBrowserFingerprint(fp, typeof currentClientIp !== 'undefined' ? currentClientIp : '');
+        if (adopted) resolved = await sb_resolveEmployeeByFingerprint(fp);
+      }
+      if (!resolved || resolved.ok !== true || !resolved.employee_id) return null;
+    }
+    var slot = parseInt(resolved.slot, 10) || 1;
+    markEmployeeSessionActive(resolved.employee_id, slot, resolved.company_id);
+    if (typeof sb_verifyEmployeeDeviceAccess === 'function') {
+      var access = await sb_verifyEmployeeDeviceAccess(resolved.employee_id, { fingerprint: fp, slot: slot });
+      if (access && access.ok === true && typeof ensureEmployeeFromServerAccess === 'function') {
+        return ensureEmployeeFromServerAccess(resolved.employee_id, slot, fp, access);
+      }
+    }
+    var stub = {
+      id: resolved.employee_id,
+      name: resolved.emp_name || 'موظف',
+      dept: resolved.dept || '—',
+      role: '—',
+      phone: '—',
+      salary: 0,
+      devices: [{ slot: slot, label: resolved.label || ('الهاتف ' + slot), fingerprint: fp }],
+      company_id: resolved.company_id || null,
+      remoteAttend: resolved.remote_attend === true
+    };
+    upsertEmployeeIntoStore(stub);
+    if (typeof ensureEmployeeTenantContext === 'function') ensureEmployeeTenantContext(stub);
+    return stub;
+  } catch (e) {
+    console.warn('resolveRegisteredEmployeeFromServer:', e);
+    return null;
+  }
+}
+
 async function refreshEmployeesFromSupabaseForEmployeeClient(reason) {
-  var cachedEmp = parseInt(localStorage.getItem('basma_registered_emp') || '0', 10);
-  var cachedSlot = parseInt(localStorage.getItem('basma_registered_slot') || '0', 10) || 1;
+  var cached = typeof getCachedEmployeeSessionIds === 'function'
+    ? getCachedEmployeeSessionIds()
+    : { empId: 0, slot: 1, companyId: 0 };
+  var cachedEmp = cached.empId;
+  var cachedSlot = cached.slot;
   if (cachedEmp && typeof refreshEmployeeClientProfileById === 'function') {
     try {
       var refreshed = await refreshEmployeeClientProfileById(cachedEmp, { slot: cachedSlot });
@@ -3405,14 +4596,31 @@ async function refreshEmployeesFromSupabaseForEmployeeClient(reason) {
 async function tryAutoEmployeeLogin() {
   try {
     if (currentUser) return true;
-    const cachedEmp = parseInt(localStorage.getItem('basma_registered_emp') || '0', 10);
-    const cachedSlot = parseInt(localStorage.getItem('basma_registered_slot') || '0', 10) || 1;
+    if (typeof restoreEmployeeDeviceSession === 'function') restoreEmployeeDeviceSession();
+    const cached = typeof getCachedEmployeeSessionIds === 'function'
+      ? getCachedEmployeeSessionIds()
+      : { empId: 0, slot: 1, companyId: 0 };
+    const cachedEmp = cached.empId;
+    const cachedSlot = cached.slot;
     const sessionActive = hasActiveEmployeeSession();
-    if (!sessionActive && !cachedEmp) return false;
     const fp = getDeviceFingerprint();
     let ip = currentClientIp || '';
     let emp = cachedEmp ? employees.find(e => e.id === cachedEmp) : null;
     let dev = emp ? getDevice(emp, cachedSlot) : null;
+    var ipRestrictOn = appSettings.ipRestrict !== false;
+
+    if (!sessionActive && !cachedEmp && ipRestrictOn && typeof resolveRegisteredEmployeeFromServer === 'function') {
+      try {
+        var bootEmp = await resolveRegisteredEmployeeFromServer(fp, ipRestrictOn);
+        if (bootEmp) {
+          emp = bootEmp;
+          dev = getDevice(emp, cachedSlot) || (emp.devices || [])[0] || { slot: cachedSlot || 1 };
+        }
+      } catch (e) {
+        console.warn('tryAutoEmployeeLogin boot resolve:', e);
+      }
+    }
+    if (!sessionActive && !cachedEmp && !emp) return false;
 
     if (sessionActive && cachedEmp && (!emp || !dev)) {
       try { await refreshEmployeesFromSupabaseForEmployeeClient('pre-auto-login'); } catch (e) {}
@@ -3425,8 +4633,6 @@ async function tryAutoEmployeeLogin() {
         dev = emp && cachedSlot ? getDevice(emp, cachedSlot) : null;
       }
     }
-
-    var ipRestrictOn = appSettings.ipRestrict !== false;
 
     if (!emp || !dev) {
       emp = findEmployeeByFingerprint(fp) || emp;
@@ -3498,19 +4704,52 @@ async function tryAutoEmployeeLogin() {
       }
     }
 
+    if ((!emp || !dev) && ipRestrictOn && typeof resolveRegisteredEmployeeFromServer === 'function') {
+      try {
+        var resolvedEmp = await resolveRegisteredEmployeeFromServer(fp, ipRestrictOn);
+        if (resolvedEmp) {
+          emp = resolvedEmp;
+          dev = getDevice(emp, cachedSlot) || (emp.devices || [])[0] || { slot: cachedSlot || 1 };
+        }
+      } catch (e) {
+        console.warn('tryAutoEmployeeLogin fingerprint resolve:', e);
+      }
+    }
+
     if (!emp || !dev) {
       if (!sessionActive) clearRegisteredDeviceCache();
       return false;
+    }
+
+    if (emp && typeof sb_employeeLoginGate === 'function') {
+      try {
+        var autoGate = await sb_employeeLoginGate(emp.id);
+        if (autoGate && autoGate.active === false) {
+          emp.active = false;
+          window.__basmaEmpLoginNotice = { title: 'تم إيقاف الحساب', text: (autoGate.message || SUSPENDED_MSG) };
+          clearRegisteredDeviceCache();
+          return false;
+        }
+        if (autoGate && autoGate.active === true) emp.active = true;
+      } catch (e) {
+        console.warn('tryAutoEmployeeLogin gate:', e);
+      }
     }
 
     ip = ip || await fetchClientIp().catch(() => '');
     dev.last_login = new Date().toISOString();
     if (ip && dev.ip !== ip) dev.ip = ip;
     dev.deviceInfo = getDeviceInfo();
-    markEmployeeSessionActive(emp.id, dev.slot);
+    markEmployeeSessionActive(emp.id, dev.slot, emp.company_id);
     currentClientIp = ip || currentClientIp;
     currentUser = 'emp';
     window.loggedInEmpId = emp.id;
+    if (typeof clearAdminSessionForEmployeeClient === 'function') clearAdminSessionForEmployeeClient();
+    if (typeof refreshEmployeeSubscriptionForEmp === 'function') {
+      try { await refreshEmployeeSubscriptionForEmp(emp); } catch (e) {
+        console.warn('tryAutoEmployeeLogin subscription refresh:', e);
+      }
+    }
     if (typeof refreshLoggedInEmployeeFromServer === 'function') {
       try { await refreshLoggedInEmployeeFromServer(); } catch (e) {
         console.warn('tryAutoEmployeeLogin profile refresh:', e);
@@ -3531,6 +4770,8 @@ async function tryAutoEmployeeLogin() {
         console.warn('tryAutoEmployeeLogin salary history refresh:', e);
       }
     }
+    upsertEmployeeIntoStore(emp);
+    ensureEmployeeTenantContext(emp);
     saveData();
     launchApp();
     return true;
@@ -3542,6 +4783,7 @@ async function tryAutoEmployeeLogin() {
 }
 
 async function runAutoLoginRestore() {
+  if (window.__basmaQrRegistrationInProgress || (typeof hasQrRegistrationParams === 'function' && hasQrRegistrationParams())) return false;
   if (_autoLoginRestoreRunning) return !!currentUser;
   if (currentUser) return true;
   var app = document.getElementById('app');
@@ -3550,13 +4792,16 @@ async function runAutoLoginRestore() {
   try {
     if (typeof hasActiveEmployeeSession === 'function' && hasActiveEmployeeSession()) {
       if (typeof clearAdminSessionForEmployeeClient === 'function') clearAdminSessionForEmployeeClient();
-      var empRestored = await tryAutoEmployeeLogin();
+      var empRestored = await withClientTimeout(tryAutoEmployeeLogin(), 18000, 'auto_employee_login');
       if (empRestored) return true;
       return false;
     }
     var adminRestored = await tryAutoAdminLogin();
     if (adminRestored) return true;
-    return await tryAutoEmployeeLogin();
+    return await withClientTimeout(tryAutoEmployeeLogin(), 18000, 'auto_employee_login');
+  } catch (e) {
+    console.warn('runAutoLoginRestore:', e);
+    return false;
   } finally {
     _autoLoginRestoreRunning = false;
   }
@@ -3564,9 +4809,6 @@ async function runAutoLoginRestore() {
 
 function initAuth() {
   if (typeof initSupabase === 'function') initSupabase();
-  if (typeof probeSupabaseProxyOnce === 'function') {
-    probeSupabaseProxyOnce().catch(function (e) { console.warn('initAuth probe:', e); });
-  }
 }
 
 function initSession() {
@@ -3667,6 +4909,7 @@ function bindVisibilitySync() {
 }
 
 function bootstrapAppShell() {
+  safeRun(function () { if (typeof restoreEmployeeDeviceSession === 'function') restoreEmployeeDeviceSession(); }, 'emp-session');
   safeRun(function () { initTheme(); }, 'theme');
   safeRun(function () { initAuth(); }, 'auth');
   safeRun(function () { initSession(); }, 'session');
@@ -3698,6 +4941,7 @@ document.addEventListener('DOMContentLoaded', function () {
 });
 
 window.addEventListener('load', function() {
+  if (window.__basmaQrRegistrationInProgress || (typeof hasQrRegistrationParams === 'function' && hasQrRegistrationParams())) return;
   if (currentUser) return;
   var app = document.getElementById('app');
   if (app && app.style.display === 'block') return;
@@ -3712,7 +4956,7 @@ const adminNav = [
   { id:'dashboard', icon:'fa-tachometer-alt', label:'لوحة التحكم' },
   { id:'employees', icon:'fa-users', label:'الموظفون' },
   { id:'attendance', icon:'fa-calendar-check', label:'الحضور والانصراف' },
-  { id:'device-mgmt', icon:'fa-mobile-alt', label:'بصمة الأجهزة' },
+  { id:'device-mgmt', icon:'fa-mobile-alt', label:'بصمة الأجهزة والتتبع' },
   { id:'leaves', icon:'fa-calendar-alt', label:'الإجازات والغياب' },
   { id:'salaries', icon:'fa-money-check-alt', label:'الرواتب' },
   { id:'finance', icon:'fa-wallet', label:'الخصومات والسلف' },
@@ -3772,7 +5016,7 @@ function getSaasSessionUser() {
 
 function clearStaleUiBlockers() {
   if (typeof document === 'undefined') return;
-  if (typeof Swal !== 'undefined') {
+  if (typeof Swal !== 'undefined' && !window.__basmaPreserveSwal) {
     try {
       if (Swal.isVisible && Swal.isVisible()) Swal.close();
     } catch (e) { /* ignore */ }
@@ -3787,8 +5031,10 @@ function clearStaleUiBlockers() {
   }
   var phoneOv = document.getElementById('phone-reg-overlay');
   if (phoneOv) phoneOv.remove();
-  var barcode = document.getElementById('barcode-modal');
-  if (barcode) barcode.classList.remove('open');
+  if (window.__basmaLoggingOut) {
+    var barcode = document.getElementById('barcode-modal');
+    if (barcode) barcode.classList.remove('open');
+  }
   if (typeof closeSidebar === 'function') closeSidebar();
   else {
     var ov = document.getElementById('sidebar-overlay');
@@ -3831,6 +5077,33 @@ function ensureAppInteractive() {
   if (sidebar && window.innerWidth > 768) sidebar.classList.remove('open');
 }
 
+function showLoginPageAfterLogout() {
+  clearStaleUiBlockers();
+  var app = document.getElementById('app');
+  if (app) {
+    app.style.display = 'none';
+    app.style.pointerEvents = 'none';
+    app.setAttribute('aria-hidden', 'true');
+    if ('inert' in app) app.inert = true;
+  }
+  var loginEl = document.getElementById('login-page');
+  if (loginEl) {
+    loginEl.style.display = 'flex';
+    loginEl.style.pointerEvents = 'auto';
+    loginEl.style.visibility = 'visible';
+    loginEl.style.opacity = '1';
+    loginEl.removeAttribute('aria-hidden');
+    if ('inert' in loginEl) loginEl.inert = false;
+  }
+  if (typeof document !== 'undefined' && document.body) {
+    document.body.classList.remove('app-active');
+  }
+  var username = document.getElementById('username');
+  if (username && typeof username.focus === 'function') {
+    setTimeout(function () { try { username.focus(); } catch (e) {} }, 50);
+  }
+}
+
 function firstAllowedAdminPage() {
   syncSaasSessionContext();
   const first = adminNav.find(n => hasCompanyPermission(n.id));
@@ -3871,9 +5144,21 @@ function _runLaunchApp() {
   if (loginPage) loginPage.style.display = 'none';
   if (appEl) appEl.style.display = 'block';
   if (typeof BasmaCloud !== 'undefined' && BasmaCloud.initCloudSync) BasmaCloud.initCloudSync();
+  if (typeof BasmaNetworkStatus !== 'undefined' && BasmaNetworkStatus.init) BasmaNetworkStatus.init();
+  if (typeof BasmaNetworkStatus !== 'undefined' && BasmaNetworkStatus.probe) {
+    setTimeout(function () { BasmaNetworkStatus.probe(true); }, 600);
+  }
   if (typeof BasmaLeaveGuard !== 'undefined' && BasmaLeaveGuard.initLeaveGuard) BasmaLeaveGuard.initLeaveGuard();
   startClock();
   if (typeof initEmployeeNameFilters === 'function') initEmployeeNameFilters();
+
+  if (typeof hydrateFinanceItemsFromCloud === 'function' && currentUser !== 'emp') {
+    hydrateFinanceItemsFromCloud({ forceRemote: true, replace: true }).then(function () {
+      if (document.getElementById('page-finance') && document.getElementById('page-finance').classList.contains('active') && typeof buildFinancePageNow === 'function') {
+        buildFinancePageNow();
+      }
+    }).catch(function () {});
+  }
 
   if (currentUser === 'emp') {
     document.querySelectorAll('.page').forEach(function (p) { p.classList.remove('active'); });
@@ -3916,6 +5201,7 @@ function _runLaunchApp() {
       buildNotifications();
       showPage('emp-home');
       if (typeof renderEmployeeFinanceNotificationsRail === 'function') renderEmployeeFinanceNotificationsRail();
+      if (typeof renderEmployeeBroadcastRail === 'function') renderEmployeeBroadcastRail();
       if (typeof startEmployeePortalPolling === 'function') startEmployeePortalPolling();
       if (typeof applyPermissionUi === 'function') applyPermissionUi();
     })();
@@ -4062,19 +5348,9 @@ async function finishLogoutTransition(wasEmployee) {
     }
   } catch (e) { console.warn('stopPeriodicCloudSync:', e); }
   if (typeof stopEmployeePortalPolling === 'function') stopEmployeePortalPolling();
-  document.getElementById('app').style.display = 'none';
-  var loginEl = document.getElementById('login-page');
-  if (loginEl) {
-    loginEl.style.display = 'flex';
-    loginEl.style.pointerEvents = '';
-    loginEl.style.visibility = '';
-    loginEl.removeAttribute('aria-hidden');
-    if ('inert' in loginEl) loginEl.inert = false;
-  }
-  if (typeof document !== 'undefined' && document.body) {
-    document.body.classList.remove('app-active');
-  }
+  showLoginPageAfterLogout();
   if (typeof renderEmployeeFinanceNotificationsRail === 'function') renderEmployeeFinanceNotificationsRail();
+  if (typeof renderEmployeeBroadcastRail === 'function') renderEmployeeBroadcastRail();
   try {
     if (typeof AuthApi !== 'undefined' && AuthApi.logoutLocal) {
       await AuthApi.logoutLocal();
@@ -4106,9 +5382,61 @@ async function finishLogoutTransition(wasEmployee) {
   if (typeof syncWindowState === 'function') syncWindowState();
   window.__basmaLoggingOut = false;
   window.__basmaDisableAutoSync = false;
+  showLoginPageAfterLogout();
 }
 
+var _handlingForeignSessionConflict = false;
+
+/**
+ * حماية من تسرّب بيانات بين الشركات: يُستدعى عندما يكتشف هذا التبويب أن جلسته
+ * تبنّت خطأً هوية شركة/مستخدم مختلف (كوكي جلسة مشتركة تغيّرت بسبب تسجيل دخول
+ * إلى شركة أخرى في تبويب آخر من نفس المتصفح). نقوم بتصفير محلي لهذا التبويب
+ * فقط دون استدعاء تسجيل الخروج البعيد (الذي سيُبطل جلسة التبويب الآخر الصحيحة).
+ */
+async function handleForeignSessionConflict() {
+  if (_handlingForeignSessionConflict) return;
+  _handlingForeignSessionConflict = true;
+  try {
+    window.__basmaLoggingOut = true;
+    window.__basmaDisableAutoSync = true;
+    try {
+      if (typeof BasmaCloud !== 'undefined' && BasmaCloud.stopPeriodicCloudSync) BasmaCloud.stopPeriodicCloudSync();
+    } catch (e) { /* ignore */ }
+    if (typeof stopEmployeePortalPolling === 'function') stopEmployeePortalPolling();
+    try {
+      if (typeof AuthApi !== 'undefined' && AuthApi.clearSupabaseSession) await AuthApi.clearSupabaseSession();
+    } catch (e) { console.warn('handleForeignSessionConflict clearSupabaseSession:', e); }
+    currentUser = null;
+    saasCurrentUser = null;
+    window._saasCurrentUser = null;
+    window.loggedInEmpId = null;
+    employees = [];
+    attData = [];
+    if (Array.isArray(window.leavesData)) window.leavesData = [];
+    if (typeof clearAdminSession === 'function') clearAdminSession();
+    if (typeof clearTenantDataStore === 'function') clearTenantDataStore();
+    if (typeof syncWindowState === 'function') syncWindowState();
+    showLoginPageAfterLogout();
+  } finally {
+    window.__basmaLoggingOut = false;
+    window.__basmaDisableAutoSync = false;
+  }
+  setTimeout(function () {
+    if (typeof Swal !== 'undefined') {
+      Swal.fire({
+        icon: 'warning',
+        title: 'يجب تسجيل الدخول من جديد',
+        text: 'تم تسجيل الدخول إلى شركة أخرى من هذا المتصفح، لذلك أُنهيت جلسة هذا التبويب حمايةً لبيانات الشركات. سجّل الدخول مرة أخرى هنا للمتابعة.',
+        confirmButtonText: 'حسناً',
+        ...(typeof swalTheme === 'function' ? swalTheme() : {})
+      });
+    }
+  }, 150);
+}
+window.handleForeignSessionConflict = handleForeignSessionConflict;
+
 async function performLogout() {
+  delete window.__basmaPortalVisitLogged;
   if (typeof BasmaCloud !== 'undefined' && BasmaCloud.stopPeriodicCloudSync) {
     BasmaCloud.stopPeriodicCloudSync();
   }
@@ -4141,6 +5469,7 @@ async function performLogout() {
     console.warn('finishLogoutTransition:', e);
     window.__basmaLoggingOut = false;
     window.__basmaDisableAutoSync = false;
+    showLoginPageAfterLogout();
   }
 }
 
@@ -4258,7 +5587,7 @@ function showPage(id) {
   if (navItem) navItem.classList.add('active');
   const titles = {
     'dashboard':'لوحة التحكم','employees':'الموظفون','attendance':'الحضور والانصراف',
-    'device-mgmt':'بصمة الأجهزة',
+    'device-mgmt':'بصمة الأجهزة والتتبع',
     'leaves':'الإجازات والغياب',
     'salaries':'الرواتب','finance':'الخصومات والمكافآت والسلف','org':'الأقسام والوظائف','reports':'التقارير','notifications':'الإشعارات',
     'users-permissions':'المستخدمون والصلاحيات','settings':'الإعدادات','emp-home':'الرئيسية','emp-salary':'الراتب','emp-profile':'الملف الشخصي',
@@ -4280,6 +5609,7 @@ function showPage(id) {
   }
   if (id === 'device-mgmt') {
     if (typeof buildDeviceManagement === 'function') buildDeviceManagement();
+    if (typeof refreshDeviceTrackingLog === 'function') refreshDeviceTrackingLog();
     refreshEmployeeDevicesUi().catch(function (e) { console.warn('refreshEmployeeDevicesUi:', e); });
   }
   if (id === 'employees') {
@@ -4287,11 +5617,30 @@ function showPage(id) {
     refreshEmployeeDevicesUi().catch(function (e) { console.warn('refreshEmployeeDevicesUi:', e); });
   }
   if (id === 'salaries') {
-    buildSalaries();
-    buildPaidSalaries();
-    refreshPaidSalaryRecordsFromCloud().then(buildPaidSalaries);
+    var renderSalaries = function () {
+      buildSalaries();
+      buildPaidSalaries();
+      refreshPaidSalaryRecordsFromCloud().then(buildPaidSalaries);
+    };
+    if (typeof ensureFinanceLoaded === 'function') {
+      ensureFinanceLoaded({ forceRemote: true, replace: false }).finally(renderSalaries);
+    } else {
+      renderSalaries();
+    }
   }
-  if (id === 'finance') { buildFinancePage(); }
+  if (id === 'finance') {
+    if (typeof ensureFinanceLoaded === 'function') {
+      ensureFinanceLoaded({ forceRemote: true, replace: true }).finally(function () {
+        buildFinancePageNow();
+      });
+    } else if (typeof hydrateFinanceItemsFromCloud === 'function') {
+      hydrateFinanceItemsFromCloud({ forceRemote: true, replace: true }).finally(function () {
+        buildFinancePageNow();
+      });
+    } else {
+      buildFinancePage();
+    }
+  }
   if (id === 'org') {
     buildOrgPage();
     refreshOrgListsFromCloud().then(function () {
@@ -4420,68 +5769,170 @@ function timeToMinutes(timeStr) {
   return (h * 60) + m;
 }
 
+function toTimeInputValue(timeStr) {
+  if (!timeStr || timeStr === '—') return '';
+  var s = String(timeStr).trim();
+  var ampmMatch = s.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+  if (ampmMatch) {
+    var h = parseInt(ampmMatch[1], 10);
+    var m = parseInt(ampmMatch[2], 10);
+    var ap = ampmMatch[3].toUpperCase();
+    if (ap === 'PM' && h !== 12) h += 12;
+    if (ap === 'AM' && h === 12) h = 0;
+    return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+  }
+  var hm = s.match(/^(\d{1,2}):(\d{2})$/);
+  if (hm) return String(parseInt(hm[1], 10)).padStart(2, '0') + ':' + hm[2];
+  return '';
+}
+
+function fromTimeInputToAmPm(value) {
+  var v = String(value || '').trim();
+  if (!v) return '—';
+  var hm = v.match(/^(\d{1,2}):(\d{2})$/);
+  if (!hm) return v;
+  var h24 = parseInt(hm[1], 10);
+  var m = parseInt(hm[2], 10);
+  var ap = h24 >= 12 ? 'PM' : 'AM';
+  var h12 = (h24 % 12) || 12;
+  return String(h12).padStart(2, '0') + ':' + String(m).padStart(2, '0') + ' ' + ap;
+}
+
 // ======= DASHBOARD =======
-function buildDashboard() {
-  // Calculate dynamic stats from attData
-  const todayRecords = attData.filter(isAttendanceRecordToday);
-  const presentCount = todayRecords.filter(r => r.status === 'طبيعي' || r.status === 'إضافي').length;
-  const absentCount = todayRecords.filter(r => r.status === 'غياب').length;
-  const lateCount = todayRecords.filter(r => r.status === 'متأخر').length;
-  const totalSalaries = employees.reduce((s, e) => s + e.salary, 0);
-  const totalOvertime = employees.reduce((s, e) => s + (e.days > 22 ? (e.days - 22) * 30000 : 0), 0);
-  const totalEmp = employees.length;
+function currentMonthIsoPrefix() {
+  var p = getAppDateParts();
+  return p.year + '-' + p.month;
+}
 
-  // Update stat cards
-  const statCards = document.querySelectorAll('#page-dashboard .stat-card');
-  if (statCards.length >= 5) {
-    // Present
-    const pVal = statCards[0].querySelector('.stat-value');
-    const pSub = statCards[0].querySelector('.stat-sub');
-    const pBar = statCards[0].querySelector('.progress-fill');
-    if (pVal) pVal.textContent = presentCount;
-    if (pSub) pSub.textContent = 'من أصل ' + totalEmp + ' موظف';
-    if (pBar) pBar.style.width = (totalEmp > 0 ? Math.round(presentCount/totalEmp*100) : 0) + '%';
+function computeDashboardTodayStats() {
+  var todayIso = todayIsoDate();
+  var totalEmp = (employees || []).length;
+  var recordedByEmp = {};
+  (attData || []).filter(isAttendanceRecordToday).forEach(function (r) {
+    if (!r || !r.empId) return;
+    recordedByEmp[r.empId] = r;
+  });
 
-    // Absent
-    const aVal = statCards[1].querySelector('.stat-value');
-    const aSub = statCards[1].querySelector('.stat-sub');
-    const aBar = statCards[1].querySelector('.progress-fill');
-    if (aVal) aVal.textContent = absentCount;
-    if (aSub) aSub.textContent = absentCount + ' غياب';
-    if (aBar) aBar.style.width = (totalEmp > 0 ? Math.round(absentCount/totalEmp*100) : 0) + '%';
+  var presentCount = 0;
+  var absentCount = 0;
+  var leaveCount = 0;
+  var lateCount = 0;
+  var lateMinutesTotal = 0;
+  var lateMinutesCount = 0;
 
-    // Late
-    const lVal = statCards[2].querySelector('.stat-value');
-    const lSub = statCards[2].querySelector('.stat-sub');
-    const lBar = statCards[2].querySelector('.progress-fill');
-    const avgLate = todayRecords.filter(r => r.late !== '—').length > 0 ?
-      Math.round(todayRecords.filter(r => r.late !== '—').reduce((s,r) => {
-        const m = parseInt(r.late) || 0; return s + m;
-      }, 0) / todayRecords.filter(r => r.late !== '—').length) : 0;
-    if (lVal) lVal.textContent = lateCount;
-    if (lSub) lSub.textContent = 'متوسط التأخير ' + avgLate + ' دقيقة';
-    if (lBar) lBar.style.width = (totalEmp > 0 ? Math.round(lateCount/totalEmp*100) : 0) + '%';
+  (employees || []).forEach(function (emp) {
+    if (!emp || emp.id == null) return;
+    var rec = recordedByEmp[emp.id];
+    var onLeave = typeof isDateOnEmployeeLeave === 'function' && isDateOnEmployeeLeave(emp.id, todayIso);
 
-    // Salaries
-    const sVal = statCards[3].querySelector('.stat-value');
-    if (sVal) {
-      sVal.textContent = totalSalaries.toLocaleString();
+    if (rec) {
+      if (isAdminOnlyAbsenceRecord(rec)) return;
+      if (rec.ci && rec.ci !== '—') {
+        presentCount++;
+        var lateMin = parseDurationMinutes(rec.late) || 0;
+        if (!lateMin && typeof timeToMinutes === 'function') {
+          lateMin = Math.max(0, timeToMinutes(rec.ci) - timeToMinutes(emp.checkIn || (appSettings && appSettings.workStart) || '08:00'));
+        }
+        if (lateMin > 0) {
+          lateMinutesTotal += lateMin;
+          lateMinutesCount++;
+        }
+        var threshold = typeof getEmpLateThreshold === 'function' ? getEmpLateThreshold(emp) : 0;
+        if (rec.status === 'متأخر' || lateMin > threshold) lateCount++;
+        return;
+      }
     }
 
-    // Overtime
-    const oVal = statCards[4].querySelector('.stat-value');
-    if (oVal) oVal.textContent = totalOvertime > 0 ? Math.round(totalOvertime / 30000) : 0;
+    if (onLeave) {
+      leaveCount++;
+      return;
+    }
+
+    absentCount++;
+  });
+
+  return {
+    totalEmp: totalEmp,
+    presentCount: presentCount,
+    absentCount: absentCount,
+    leaveCount: leaveCount,
+    lateCount: lateCount,
+    avgLate: lateMinutesCount > 0 ? Math.round(lateMinutesTotal / lateMinutesCount) : 0
+  };
+}
+
+function computeDashboardMonthOvertimeHours() {
+  var monthPrefix = currentMonthIsoPrefix();
+  var totalMin = 0;
+  (attData || []).forEach(function (r) {
+    if (!r) return;
+    var iso = String(r.dateIso || r.date_iso || '').slice(0, 10);
+    if (!iso || iso.slice(0, 7) !== monthPrefix) return;
+    if (!r.ot || r.ot === '—') return;
+    totalMin += parseDurationMinutes(r.ot) || 0;
+  });
+  return totalMin > 0 ? Math.round((totalMin / 60) * 10) / 10 : 0;
+}
+
+function buildDashboard() {
+  var dashStats = computeDashboardTodayStats();
+  var presentCount = dashStats.presentCount;
+  var absentCount = dashStats.absentCount;
+  var leaveCount = dashStats.leaveCount;
+  var lateCount = dashStats.lateCount;
+  var avgLate = dashStats.avgLate;
+  var totalEmp = dashStats.totalEmp;
+  var totalSalaries = (employees || []).reduce(function (s, e) {
+    return s + (parseExactInt(e && e.salary, 0) || 0);
+  }, 0);
+  var totalOvertimeHours = computeDashboardMonthOvertimeHours();
+
+  var statCards = document.querySelectorAll('#page-dashboard .stats-grid .stat-card');
+  if (statCards.length >= 5) {
+    var pVal = statCards[0].querySelector('.stat-value');
+    var pSub = statCards[0].querySelector('.stat-sub');
+    var pBar = statCards[0].querySelector('.progress-fill');
+    if (pVal) pVal.textContent = presentCount;
+    if (pSub) pSub.textContent = 'من أصل ' + totalEmp + ' موظف';
+    if (pBar) pBar.style.width = (totalEmp > 0 ? Math.round(presentCount / totalEmp * 100) : 0) + '%';
+
+    var aVal = statCards[1].querySelector('.stat-value');
+    var aSub = statCards[1].querySelector('.stat-sub');
+    var aBar = statCards[1].querySelector('.progress-fill');
+    if (aVal) aVal.textContent = absentCount;
+    if (aSub) {
+      aSub.textContent = leaveCount > 0
+        ? (leaveCount + ' إجازة • ' + absentCount + ' بدون عذر')
+        : (absentCount + ' غياب');
+    }
+    if (aBar) aBar.style.width = (totalEmp > 0 ? Math.round(absentCount / totalEmp * 100) : 0) + '%';
+
+    var lVal = statCards[2].querySelector('.stat-value');
+    var lSub = statCards[2].querySelector('.stat-sub');
+    var lBar = statCards[2].querySelector('.progress-fill');
+    if (lVal) lVal.textContent = lateCount;
+    if (lSub) lSub.textContent = lateCount > 0 ? ('متوسط التأخير ' + avgLate + ' دقيقة') : 'لا يوجد تأخير اليوم';
+    if (lBar) lBar.style.width = (totalEmp > 0 ? Math.round(lateCount / totalEmp * 100) : 0) + '%';
+
+    var sVal = statCards[3].querySelector('.stat-value');
+    if (sVal) sVal.textContent = totalSalaries.toLocaleString();
+
+    var oVal = statCards[4].querySelector('.stat-value');
+    var oSub = statCards[4].querySelector('.stat-sub');
+    if (oVal) oVal.textContent = String(totalOvertimeHours);
+    if (oSub) oSub.textContent = totalOvertimeHours > 0 ? 'ساعة هذا الشهر' : 'لا توجد ساعات إضافية';
   }
 
-  // Table — سجلات اليوم فقط
-  const tbody = document.getElementById('dashboard-table');
+  var tbody = document.getElementById('dashboard-table');
   if (tbody) {
-    const statusMap = { 'طبيعي':'badge-success', 'متأخر':'badge-warning', 'غياب':'badge-danger', 'إضافي':'badge-info' };
-    const statusIcon = { 'طبيعي':'🟢', 'متأخر':'🟡', 'غياب':'🔴', 'إضافي':'🔵' };
-    const dashTodayRecords = attData.filter(isAttendanceRecordToday);
-    tbody.innerHTML = dashTodayRecords.length ? dashTodayRecords.map(r => {
-      const st = esc(r.status);
-      const timeCell = r.ci === '—' ? '<span class="badge badge-danger">غائب</span>' :
+    var statusMap = { 'طبيعي':'badge-success', 'متأخر':'badge-warning', 'غياب':'badge-danger', 'إضافي':'badge-info' };
+    var statusIcon = { 'طبيعي':'🟢', 'متأخر':'🟡', 'غياب':'🔴', 'إضافي':'🔵' };
+    var dashTodayRecords = attData.filter(function (r) {
+      return isAttendanceRecordToday(r) && isPunchAttendanceRecord(r);
+    });
+    tbody.innerHTML = dashTodayRecords.length ? dashTodayRecords.map(function (r) {
+      var st = esc(r.status);
+      var timeCell = r.ci === '—' ? '<span class="badge badge-danger">غائب</span>' :
         '<div class="time-slot"><span>' + esc(fmtTimeDisplay(r.ci)) + '</span><span class="time-arrow">←</span><span>' + esc(fmtTimeDisplay(r.co)) + '</span></div>';
       return '<tr>' +
         '<td><strong>' + esc(attRecordDisplayName(r)) + '</strong></td>' +
@@ -4493,7 +5944,6 @@ function buildDashboard() {
     }).join('') : '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--text-muted)">لا توجد سجلات حضور لليوم</td></tr>';
   }
 
-  // Charts — بيانات فعلية + ألوان حسب الوضع
   setTimeout(function () {
     if (typeof BasmaCharts === 'undefined') return;
     BasmaCharts.buildWeekChart(attData);
@@ -4519,15 +5969,16 @@ function editAttRecord(empId, date) {
   const statusOpts = ['طبيعي','متأخر','غياب','إضافي'].map(s =>
     '<option value="' + s + '"' + (s === rec.status ? ' selected' : '') + '>' + s + '</option>'
   ).join('');
+  const recIso = attendanceRecordIso(rec) || todayIsoDate();
 
   Swal.fire({
     title: '✏️ تعديل سجل الحضور',
     html: '<div class="emp-form-wrap">' +
       '<div class="emp-field"><label>الموظف</label><select id="att-emp-id">' + empOpts + '</select></div>' +
-      '<div class="emp-field"><label>التاريخ</label><input type="text" id="att-date" value="' + rec.date + '"></div>' +
+      '<div class="emp-field"><label>التاريخ</label><input type="date" id="att-date" value="' + escAttr(recIso) + '"></div>' +
       '<div class="emp-field-row">' +
-      '<div class="emp-field"><label>وقت الحضور</label><input type="text" id="att-ci" dir="ltr" value="' + (rec.ci !== '—' ? rec.ci : '') + '" placeholder="08:00 AM"></div>' +
-      '<div class="emp-field"><label>وقت الانصراف</label><input type="text" id="att-co" dir="ltr" value="' + (rec.co !== '—' ? rec.co : '') + '" placeholder="05:00 PM"></div>' +
+      '<div class="emp-field"><label>وقت الحضور</label><input type="time" id="att-ci" dir="ltr" value="' + escAttr(toTimeInputValue(rec.ci)) + '" step="60"><label class="att-clear-card att-clear-ci"><input type="checkbox" id="att-clear-ci" onchange="(function(){var b=document.getElementById(\'att-clear-ci\');var t=document.getElementById(\'att-ci\'); if(t){ t.disabled=!!(b&&b.checked); t.style.opacity=(b&&b.checked)?\'0.55\':\'1\'; }})()"><span class="att-clear-card-check"></span><span class="att-clear-card-body"><span class="att-clear-card-title">مسح الحضور فقط</span><span class="att-clear-card-desc">سيتم حذف وقت الحضور فقط، وسيبقى الانصراف كما هو.</span></span></label></div>' +
+      '<div class="emp-field"><label>وقت الانصراف</label><input type="time" id="att-co" dir="ltr" value="' + escAttr(toTimeInputValue(rec.co)) + '" step="60"><label class="att-clear-card att-clear-co"><input type="checkbox" id="att-clear-co" onchange="(function(){var b=document.getElementById(\'att-clear-co\');var t=document.getElementById(\'att-co\'); if(t){ t.disabled=!!(b&&b.checked); t.style.opacity=(b&&b.checked)?\'0.55\':\'1\'; }})()"><span class="att-clear-card-check"></span><span class="att-clear-card-body"><span class="att-clear-card-title">مسح الانصراف فقط</span><span class="att-clear-card-desc">سيتم حذف وقت الانصراف فقط، وسيبقى الحضور كما هو.</span></span></label></div>' +
       '</div>' +
       '<div class="emp-field-row">' +
       '<div class="emp-field"><label>ساعات العمل</label><input type="text" id="att-hrs" value="' + (rec.hrs !== '—' ? rec.hrs : '') + '" placeholder="8س 00د"></div>' +
@@ -4545,14 +5996,20 @@ function editAttRecord(empId, date) {
     preConfirm: () => {
       const newEmpId = parseInt(document.getElementById('att-emp-id').value, 10);
       const newDate = document.getElementById('att-date').value.trim();
-      const ci = document.getElementById('att-ci').value.trim() || '—';
-      const co = document.getElementById('att-co').value.trim() || '—';
+      const clearCi = !!document.getElementById('att-clear-ci')?.checked;
+      const clearCo = !!document.getElementById('att-clear-co')?.checked;
+      const ciInput = document.getElementById('att-ci').value.trim();
+      const coInput = document.getElementById('att-co').value.trim();
+      const ci = clearCi ? '—' : fromTimeInputToAmPm(ciInput);
+      const co = clearCo ? '—' : fromTimeInputToAmPm(coInput);
       const hrs = document.getElementById('att-hrs').value.trim() || '—';
       const late = document.getElementById('att-late').value.trim() || '—';
       const ot = document.getElementById('att-ot').value.trim() || '—';
       const status = document.getElementById('att-status').value;
       if (!newDate) { Swal.showValidationMessage('التاريخ مطلوب'); return false; }
-      return { newEmpId, newDate, ci, co, hrs, late, ot, status };
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(newDate)) { Swal.showValidationMessage('صيغة التاريخ غير صحيحة'); return false; }
+      if (clearCi && clearCo) { Swal.showValidationMessage('اختر مسح الحضور أو الانصراف فقط (واحد فقط)'); return false; }
+      return { newEmpId, newDate, ci, co, clearCi, clearCo, hrs, late, ot, status };
     }
   }).then(async r => {
     if (!r.isConfirmed || !r.value) return;
@@ -4562,26 +6019,54 @@ function editAttRecord(empId, date) {
     attData[idx].empId = v.newEmpId;
     attData[idx].emp = newEmp ? fullEmpName(newEmp.name) : attData[idx].emp;
     attData[idx].dept = newEmp ? newEmp.dept : attData[idx].dept;
-    attData[idx].date = v.newDate;
+    attData[idx].dateIso = v.newDate;
+    attData[idx].date = v.newDate.replace(/-/g, '/');
     attData[idx].ci = v.ci;
     attData[idx].co = v.co;
     attData[idx].hrs = v.hrs;
     attData[idx].late = v.late;
     attData[idx].ot = v.ot;
     attData[idx].status = v.status;
+    if (v.status === 'غياب' && v.ci === '—' && v.co === '—') {
+      attData[idx]._adminBatchAbsence = true;
+      attData[idx]._adminReason = 'admin_batch_absence';
+    } else {
+      delete attData[idx]._adminBatchAbsence;
+      if (attData[idx]._adminReason === 'admin_batch_absence') delete attData[idx]._adminReason;
+    }
     syncAttendanceRecordHours(attData[idx], newEmp || emp);
-    if (!attData[idx].dateIso) attData[idx].dateIso = todayIsoDate();
     attData[idx]._pendingRemoteSync = true;
     attData[idx]._localAttEditAt = Date.now();
-    await persistAttendanceNow(attData[idx]);
+    attData[idx]._clearCheckIn = !!v.clearCi;
+    attData[idx]._clearCheckOut = !!v.clearCo;
+    const saved = await persistAttendanceNow(attData[idx]);
+    if (!saved || saved.ok === false) {
+      delete attData[idx]._clearCheckIn;
+      delete attData[idx]._clearCheckOut;
+      Swal.fire({ icon:'error', title:'تعذر حفظ التعديل في السحابة', text:'لم يتم اعتماد تعديل الحضور حتى لا يعود السجل للقيمة السابقة.', ...swalTheme() });
+      window.__basmaSuppressRealtimeUntil = 0;
+      return;
+    }
+    if (saved.ok === true) {
+      applyServerAttendanceToRecord(attData[idx], saved, newEmp || emp);
+    } else {
+      if (saved.id) attData[idx].id = saved.id;
+      if (saved.check_in !== undefined) attData[idx].ci = saved.check_in || '—';
+      if (saved.check_out !== undefined) attData[idx].co = saved.check_out || '—';
+      if (saved.hours !== undefined) attData[idx].hrs = saved.hours || '—';
+      if (saved.late !== undefined) attData[idx].late = saved.late || '—';
+      if (saved.overtime !== undefined) attData[idx].ot = saved.overtime || '—';
+      if (saved.status) attData[idx].status = saved.status;
+      if (saved.date_label) attData[idx].date = saved.date_label;
+      if (saved.date_iso) attData[idx].dateIso = String(saved.date_iso).slice(0, 10);
+      syncAttendanceRecordHours(attData[idx], newEmp || emp);
+    }
+    delete attData[idx]._clearCheckIn;
+    delete attData[idx]._clearCheckOut;
     // Recalculate emp.days and emp.lateMin from attendance data
     if (emp) {
-      const empAtts = attData.filter(r => r.empId === emp.id);
-      emp.days = empAtts.filter(r => r.ci && r.ci !== '—').length;
-      emp.lateMin = empAtts.reduce((sum, r) => {
-        if (r.late && r.late !== '—') { const n = parseInt(String(r.late).replace(/[^\d]/g, '')); return sum + (isNaN(n) ? 0 : n); }
-        return sum;
-      }, 0);
+      emp.days = countEmployeePresentDays(emp.id, attData);
+      emp.lateMin = countEmployeeLateMinutes(emp.id, attData);
     }
     if (emp) await persistEmployeeNow(emp);
     saveData();
@@ -4640,12 +6125,8 @@ function deleteAttRecord(empId, date) {
 
     // Recalculate emp.days and emp.lateMin from attendance data
     if (emp) {
-      const empAtts = attData.filter(r => r.empId === emp.id);
-      emp.days = empAtts.filter(r => r.ci && r.ci !== '—').length;
-      emp.lateMin = empAtts.reduce((sum, r) => {
-        if (r.late && r.late !== '—') { const n = parseInt(String(r.late).replace(/[^\d]/g, '')); return sum + (isNaN(n) ? 0 : n); }
-        return sum;
-      }, 0);
+      emp.days = countEmployeePresentDays(emp.id, attData);
+      emp.lateMin = countEmployeeLateMinutes(emp.id, attData);
     }
 
     saveData();
@@ -4663,79 +6144,98 @@ function deleteAttRecordsBatch() {
     Swal.fire({ icon: 'warning', title: 'لا يوجد موظفون', text: 'أضف موظفين أولاً', ...swalTheme() });
     return;
   }
-  var empOpts = employees.map(function (e) {
-    return '<option value="' + e.id + '">' + esc(e.name) + '</option>';
-  }).join('');
-  Swal.fire({
-    title: '🗑️ حذف سجلات حضور دفعة واحدة',
-    html: '<div class="emp-form-wrap" style="text-align:right">' +
-      '<div class="emp-field"><label>الموظف</label><select id="att-batch-emp" class="setting-input" style="width:100%">' + empOpts + '</select></div>' +
-      '<div class="emp-field-row">' +
-      '<div class="emp-field"><label>من تاريخ</label><input type="date" id="att-batch-from" class="setting-input" style="width:100%"></div>' +
-      '<div class="emp-field"><label>إلى تاريخ</label><input type="date" id="att-batch-to" class="setting-input" style="width:100%"></div>' +
-      '</div>' +
-      '<div style="font-size:12px;color:var(--text-muted);margin-top:8px">سيتم حذف جميع سجلات الحضور والانصراف للموظف المحدد ضمن الفترة المختارة.</div>' +
-      '</div>',
-    ...swalTheme(),
-    showCancelButton: true,
-    confirmButtonText: 'متابعة',
-    cancelButtonText: 'إلغاء',
-    preConfirm: function () {
-      var empId = parseInt(document.getElementById('att-batch-emp')?.value || '0', 10);
-      var fromIso = document.getElementById('att-batch-from')?.value || '';
-      var toIso = document.getElementById('att-batch-to')?.value || '';
-      if (!empId) { Swal.showValidationMessage('اختر الموظف'); return false; }
-      if (!fromIso || !toIso) { Swal.showValidationMessage('حدد تاريخ البداية والنهاية'); return false; }
-      if (fromIso > toIso) { Swal.showValidationMessage('تاريخ البداية يجب أن يكون قبل تاريخ النهاية'); return false; }
-      return { empId: empId, fromIso: fromIso, toIso: toIso };
-    }
-  }).then(function (r) {
-    if (!r.isConfirmed || !r.value) return;
-    var empId = r.value.empId;
-    var fromIso = r.value.fromIso;
-    var toIso = r.value.toIso;
-    var emp = employees.find(function (e) { return e && e.id === empId; });
-    var rawMatches = (attData || []).filter(function (rec) {
-      return rec && rec.empId === empId && attRecordInDateRange(rec, fromIso, toIso);
-    });
-    var matchGroups = {};
-    rawMatches.forEach(function (rec) {
-      var key = attendanceRecordKey(rec);
-      if (!key) return;
-      if (!matchGroups[key]) matchGroups[key] = [];
-      matchGroups[key].push(rec);
-    });
-    var uniqueKeys = Object.keys(matchGroups);
-    if (!uniqueKeys.length) {
+  (async function runBatchDeleteFlow() {
+    window.__basmaPreserveSwal = true;
+    try {
+      var empOpts = employees.map(function (e) {
+        return '<option value="' + e.id + '">' + esc(e.name) + '</option>';
+      }).join('');
+      var r = await Swal.fire({
+        title: '🗑️ حذف سجلات حضور دفعة واحدة',
+        html: '<div class="emp-form-wrap" style="text-align:right">' +
+          '<div class="emp-field"><label>الموظف</label><select id="att-batch-emp" class="setting-input" style="width:100%">' + empOpts + '</select></div>' +
+          '<div class="emp-field-row">' +
+          '<div class="emp-field"><label>من تاريخ</label><input type="date" id="att-batch-from" class="setting-input" style="width:100%"></div>' +
+          '<div class="emp-field"><label>إلى تاريخ</label><input type="date" id="att-batch-to" class="setting-input" style="width:100%"></div>' +
+          '</div>' +
+          '<div style="font-size:12px;color:var(--text-muted);margin-top:8px">سيتم حذف جميع سجلات الحضور والانصراف للموظف المحدد ضمن الفترة المختارة من السحابة.</div>' +
+          '</div>',
+        ...swalTheme(),
+        showCancelButton: true,
+        confirmButtonText: 'متابعة',
+        cancelButtonText: 'إلغاء',
+        preConfirm: function () {
+          var empId = parseInt(document.getElementById('att-batch-emp')?.value || '0', 10);
+          var fromIso = document.getElementById('att-batch-from')?.value || '';
+          var toIso = document.getElementById('att-batch-to')?.value || '';
+          if (!empId) { Swal.showValidationMessage('اختر الموظف'); return false; }
+          if (!fromIso || !toIso) { Swal.showValidationMessage('حدد تاريخ البداية والنهاية'); return false; }
+          if (fromIso > toIso) { Swal.showValidationMessage('تاريخ البداية يجب أن يكون قبل تاريخ النهاية'); return false; }
+          return { empId: empId, fromIso: fromIso, toIso: toIso };
+        }
+      });
+      if (!r.isConfirmed || !r.value) return;
+
+      var empId = r.value.empId;
+      var fromIso = r.value.fromIso;
+      var toIso = r.value.toIso;
+      var emp = employees.find(function (e) { return e && e.id === empId; });
+
       Swal.fire({
-        icon: 'info',
-        title: 'لا توجد سجلات',
-        text: 'لم يُعثر على سجلات حضور للموظف في الفترة المحددة.',
+        title: '⏳ جارٍ جلب السجلات من السحابة...',
+        allowOutsideClick: false,
+        didOpen: function () { Swal.showLoading(); },
         ...swalTheme()
       });
-      return;
-    }
-    var fromDisplay = fromIso.replace(/-/g, '/');
-    var toDisplay = toIso.replace(/-/g, '/');
-    Swal.fire({
-      title: 'تأكيد الحذف',
-      html: 'هل تريد حذف <b style="color:#fc8181">' + uniqueKeys.length + '</b> سجل حضور للموظف <b>' + esc(emp ? emp.name : '') + '</b><br>من <b>' + fromDisplay + '</b> إلى <b>' + toDisplay + '</b>؟' +
-        (rawMatches.length > uniqueKeys.length ? '<br><span style="font-size:12px;color:var(--text-muted)">سيتم إزالة ' + rawMatches.length + ' صف محلي (' + (rawMatches.length - uniqueKeys.length) + ' مكرر)</span>' : '') +
-        '<br><br><span style="font-size:12px;color:var(--text-muted)">لا يمكن التراجع عن هذا الإجراء.</span>',
-      icon: 'warning',
-      showCancelButton: true,
-      confirmButtonText: 'نعم، احذف الكل',
-      cancelButtonText: 'إلغاء',
-      ...swalTheme(),
-      confirmButtonColor: '#e53e3e'
-    }).then(async function (r2) {
+      if (typeof AuthApi !== 'undefined' && AuthApi.refreshAuthSessionForWrite) {
+        await AuthApi.refreshAuthSessionForWrite();
+      }
+      await loadAttendanceForBatchDelete(empId, fromIso, toIso);
+      if (Swal.isVisible()) Swal.close();
+
+      var rawMatches = (attData || []).filter(function (rec) {
+        return rec && rec.empId === empId && attRecordInDateRange(rec, fromIso, toIso);
+      });
+      var matchGroups = {};
+      rawMatches.forEach(function (rec) {
+        var key = attendanceRecordKey(rec);
+        if (!key) return;
+        if (!matchGroups[key]) matchGroups[key] = [];
+        matchGroups[key].push(rec);
+      });
+      var uniqueKeys = Object.keys(matchGroups);
+      if (!uniqueKeys.length) {
+        Swal.fire({
+          icon: 'info',
+          title: 'لا توجد سجلات',
+          text: 'لم يُعثر على سجلات حضور للموظف في الفترة المحددة (محلياً أو في السحابة).',
+          ...swalTheme()
+        });
+        return;
+      }
+      var fromDisplay = fromIso.replace(/-/g, '/');
+      var toDisplay = toIso.replace(/-/g, '/');
+      var r2 = await Swal.fire({
+        title: 'تأكيد الحذف',
+        html: 'هل تريد حذف <b style="color:#fc8181">' + uniqueKeys.length + '</b> سجل حضور للموظف <b>' + esc(emp ? emp.name : '') + '</b><br>من <b>' + fromDisplay + '</b> إلى <b>' + toDisplay + '</b>؟' +
+          (rawMatches.length > uniqueKeys.length ? '<br><span style="font-size:12px;color:var(--text-muted)">سيتم إزالة ' + rawMatches.length + ' صف محلي (' + (rawMatches.length - uniqueKeys.length) + ' مكرر)</span>' : '') +
+          '<br><br><span style="font-size:12px;color:var(--text-muted)">لا يمكن التراجع عن هذا الإجراء.</span>',
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonText: 'نعم، احذف الكل',
+        cancelButtonText: 'إلغاء',
+        ...swalTheme(),
+        confirmButtonColor: '#e53e3e'
+      });
       if (!r2.isConfirmed) return;
+
       pauseRemoteSync(20000);
       var keysToDelete = {};
       var failed = 0;
+      var failDetails = [];
       await runWithBatchProgress({
         title: 'جاري الحذف...',
-        subtitle: 'يتم حذف السجلات من السحابة والجهاز',
+        subtitle: 'يتم حذف السجلات من السحابة',
         total: uniqueKeys.length,
         run: async function (update) {
           for (var gi = 0; gi < uniqueKeys.length; gi++) {
@@ -4754,16 +6254,17 @@ function deleteAttRecordsBatch() {
                 }
               }
               if (!cloudOk) {
-                var fallback = await sb_deleteAttendance({
+                var fallbackRec = Object.assign({}, group[0], {
                   empId: group[0].empId,
                   dateIso: attendanceRecordIso(group[0]),
-                  id: null
+                  id: group[0].id || null
                 });
-                cloudOk = !!fallback;
+                cloudOk = !!(await sb_deleteAttendance(fallbackRec));
               }
             }
             if (!cloudOk && typeof sb_deleteAttendance === 'function') {
               failed++;
+              failDetails.push(dayLabel);
             } else {
               keysToDelete[groupKey] = true;
             }
@@ -4774,7 +6275,12 @@ function deleteAttRecordsBatch() {
       });
       if (!Object.keys(keysToDelete).length) {
         resumeRemoteSync(0);
-        Swal.fire({ icon: 'error', title: 'تعذر الحذف', text: 'لم يتم حذف أي سجل من السحابة.', ...swalTheme() });
+        Swal.fire({
+          icon: 'error',
+          title: 'تعذر الحذف',
+          html: 'لم يتم حذف أي سجل من السحابة.' + (failDetails.length ? '<br><span style="font-size:12px;color:var(--text-muted)">أيام فشلت: ' + esc(failDetails.slice(0, 8).join('، ')) + '</span>' : ''),
+          ...swalTheme()
+        });
         return;
       }
       attData = (attData || []).filter(function (row) {
@@ -4791,12 +6297,51 @@ function deleteAttRecordsBatch() {
       refreshAll();
       logActivity('delete', 'attendance', 'حذف دفعة سجلات حضور: ' + (emp ? emp.name : empId) + ' — ' + fromDisplay + ' → ' + toDisplay + ' (' + Object.keys(keysToDelete).length + ')', { targetName: emp ? emp.name : '', empId: empId, targetEmpId: empId });
       var deletedCount = Object.keys(keysToDelete).length;
-      var msg = 'تم حذف ' + deletedCount + ' يوم حضور';
-      if (failed > 0) msg += ' — فشل حذف ' + failed + ' يوم من السحابة';
+      var msg = 'تم حذف ' + deletedCount + ' يوم حضور من السحابة';
+      if (failed > 0) msg += ' — فشل حذف ' + failed + ' يوم';
       Swal.fire({ icon: failed > 0 ? 'warning' : 'success', title: 'تم الحذف', text: msg, ...swalTheme(), timer: failed > 0 ? 0 : 2200, showConfirmButton: failed > 0 });
       resumeRemoteSync(9000);
-    });
+    } catch (e) {
+      console.error('deleteAttRecordsBatch:', e);
+      Swal.fire({ icon: 'error', title: 'تعذّر الحذف', text: (e && e.message) || 'حدث خطأ أثناء حذف الدفعة', ...swalTheme() });
+    } finally {
+      window.__basmaPreserveSwal = false;
+    }
+  })();
+}
+
+async function mergeAttendanceRangeFromCloud(empId, fromIso, toIso) {
+  empId = parseInt(empId, 10);
+  if (!empId || !fromIso || !toIso) return false;
+  if (typeof sb_getAttendance !== 'function') return false;
+  var rows = await sb_getAttendance({ employeeId: empId, dateFrom: fromIso, dateTo: toIso, limit: 500 });
+  if (!rows || !rows.length) return false;
+  var keep = (attData || []).filter(function (r) {
+    if (!r || r.empId !== empId) return true;
+    return !attRecordInDateRange(r, fromIso, toIso);
   });
+  rows.forEach(function (r) { keep.push(r); });
+  attData = typeof dedupeAttendanceRecords === 'function' ? dedupeAttendanceRecords(keep) : keep;
+  window.attData = attData;
+  if (typeof normalizeAttendanceStore === 'function') normalizeAttendanceStore();
+  if (typeof saveData === 'function') saveData();
+  return true;
+}
+
+async function loadAttendanceForBatchDelete(empId, fromIso, toIso) {
+  empId = parseInt(empId, 10);
+  if (!empId || !fromIso || !toIso) return;
+  if (typeof sb_getAttendance !== 'function') return;
+  var rows = await sb_getAttendance({ employeeId: empId, dateFrom: fromIso, dateTo: toIso, limit: 500 });
+  if (!rows || !rows.length) return;
+  var keep = (attData || []).filter(function (r) {
+    if (!r || r.empId !== empId) return true;
+    return !attRecordInDateRange(r, fromIso, toIso);
+  });
+  rows.forEach(function (r) { keep.push(r); });
+  attData = typeof dedupeAttendanceRecords === 'function' ? dedupeAttendanceRecords(keep) : keep;
+  window.attData = attData;
+  if (typeof normalizeAttendanceStore === 'function') normalizeAttendanceStore();
 }
 
 function addAttRecord() {
@@ -5043,6 +6588,10 @@ function addAttRecord() {
         empId: v.empId, emp: fullEmpName(emp.name), dept: emp.dept,
         date: dateStr, dateIso: iso, ci: dayCi, co: dayCo, hrs: dayHrs, late: dayLate, ot: dayOt, status: dayStatus
       };
+      if (dayStatus === 'غياب') {
+        newRec._adminBatchAbsence = true;
+        newRec._adminReason = 'admin_batch_absence';
+      }
       attData.push(newRec);
       await persistAttendanceNow(newRec);
       added++;
@@ -5058,8 +6607,16 @@ function addAttRecord() {
     if (typeof normalizeAttendanceStore === 'function') normalizeAttendanceStore();
     await persistEmployeeNow(emp);
 
+    if (typeof mergeAttendanceRangeFromCloud === 'function') {
+      await mergeAttendanceRangeFromCloud(v.empId, v.fromDate, v.toDate);
+    }
+
     saveData();
-    refreshAll();
+    if (typeof syncSalaryAfterAttendanceChange === 'function') {
+      await syncSalaryAfterAttendanceChange(v.empId);
+    } else {
+      refreshAll();
+    }
     logActivity('add', 'attendance', 'إضافة ' + added + ' سجل حضور للموظف: ' + emp.name, { targetName: emp.name, empId: emp.id, targetEmpId: emp.id });
 
     // Show result with salary info
@@ -5070,7 +6627,7 @@ function addAttRecord() {
       const sal = calcEmpSalary(emp);
       const baseSalary = sal.baseSalary;
       const deduct = sal.totalDeduct;
-      const ot = sal.ot;
+      const ot = sal.overtimeInNet ? (sal.ot || 0) : 0;
       const finalSal = sal.final;
       resultHtml += '<br><br><div style="padding:8px 12px;background:rgba(104,211,145,0.1);border:1px solid rgba(104,211,145,0.2);border-radius:8px;text-align:right;font-size:13px">' +
         '<div>📋 أيام الحضور: <b>' + emp.days + '</b></div>' +
@@ -5096,6 +6653,58 @@ function countFridays(from, to) {
   return count;
 }
 
+function applyAttendanceFilters(list) {
+  var fDept = document.getElementById('att-filter-dept')?.value || '';
+  var fPeriod = document.getElementById('att-filter-period')?.value || 'today';
+  var fStatus = document.getElementById('att-filter-status')?.value || '';
+  var fFrom = parseIsoDateOnly(document.getElementById('att-filter-from')?.value || '');
+  var fTo = parseIsoDateOnly(document.getElementById('att-filter-to')?.value || '');
+  var fName = typeof getEmployeeNameQuery === 'function'
+    ? getEmployeeNameQuery('att-filter-name')
+    : (document.getElementById('att-filter-name')?.value || '').trim().toLowerCase();
+  var filtered = Array.isArray(list) ? list.slice() : [];
+  filtered = filtered.filter(function (r) { return isPunchAttendanceRecord(r); });
+  if (fDept) filtered = filtered.filter(function (r) { return r.dept === fDept; });
+  if (fStatus) filtered = filtered.filter(function (r) { return r.status === fStatus; });
+  if (fName) {
+    filtered = filtered.filter(function (r) {
+      return typeof attendanceRecordMatchesNameQuery === 'function'
+        ? attendanceRecordMatchesNameQuery(r, fName, employees)
+        : String(r.emp || '').toLowerCase().indexOf(fName) >= 0;
+    });
+  }
+  if (fFrom || fTo) {
+    filtered = filtered.filter(function (r) {
+      var iso = parseIsoDateOnly(r.dateIso || r.date_iso || '');
+      if (!iso) return false;
+      if (fFrom && iso < fFrom) return false;
+      if (fTo && iso > fTo) return false;
+      return true;
+    });
+  } else if (fPeriod === 'today') {
+    filtered = filtered.filter(function (r) { return isAttendanceRecordToday(r); });
+  } else if (fPeriod === 'week') {
+    var weekCutoff = new Date(); weekCutoff.setDate(weekCutoff.getDate() - 6); weekCutoff.setHours(0,0,0,0);
+    filtered = filtered.filter(function (r) { var iso = r.dateIso || r.date_iso || ''; return iso ? new Date(iso + 'T12:00:00') >= weekCutoff : false; });
+  } else if (fPeriod === 'month') {
+    var now = new Date();
+    var monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    var monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    filtered = filtered.filter(function (r) {
+      var iso = r.dateIso || r.date_iso || '';
+      if (!iso) return false;
+      var d = new Date(iso + 'T12:00:00');
+      return d >= monthStart && d <= monthEnd;
+    });
+  }
+  return filtered.sort(function (a, b) {
+    var isoA = attendanceRecordIso(a);
+    var isoB = attendanceRecordIso(b);
+    if (isoA && isoB) return isoB.localeCompare(isoA);
+    return String(b.date || '').localeCompare(String(a.date || ''));
+  });
+}
+
 function exportAttExcel() {
   if (!requireActionPermission('attendance', 'export')) return;
   if (typeof XLSX === 'undefined') {
@@ -5104,28 +6713,7 @@ function exportAttExcel() {
   }
   logActivity('export', 'attendance', 'تصدير تقرير الحضور Excel');
   try {
-    var fDept = document.getElementById('att-filter-dept')?.value || '';
-    var fPeriod = document.getElementById('att-filter-period')?.value || 'today';
-    var fStatus = document.getElementById('att-filter-status')?.value || '';
-    var fName = typeof getEmployeeNameQuery === 'function'
-      ? getEmployeeNameQuery('att-filter-name')
-      : (document.getElementById('att-filter-name')?.value || '').trim().toLowerCase();
-    var filtered = [...attData];
-    if (fDept) filtered = filtered.filter(function(r) { return r.dept === fDept; });
-    if (fStatus) filtered = filtered.filter(function(r) { return r.status === fStatus; });
-    if (fName) {
-      filtered = filtered.filter(function(r) {
-        return typeof attendanceRecordMatchesNameQuery === 'function'
-          ? attendanceRecordMatchesNameQuery(r, fName, employees)
-          : String(r.emp || '').toLowerCase().indexOf(fName) >= 0;
-      });
-    }
-    if (fPeriod === 'today') {
-      filtered = filtered.filter(function(r) { return isAttendanceRecordToday(r); });
-    } else if (fPeriod === 'week') {
-      var weekCutoff = new Date(); weekCutoff.setDate(weekCutoff.getDate() - 6); weekCutoff.setHours(0,0,0,0);
-      filtered = filtered.filter(function(r) { var iso = r.dateIso || r.date_iso || ''; return iso ? new Date(iso) >= weekCutoff : false; });
-    }
+    var filtered = applyAttendanceFilters(attData);
     var rows = filtered.map(function(r, i) {
       return {
         '#': i + 1,
@@ -5392,25 +6980,9 @@ function exportAttPdf() {
     logActivity('export', 'attendance', 'تصدير تقرير الحضور PDF');
     var fDept = document.getElementById('att-filter-dept')?.value || '';
     var fPeriod = document.getElementById('att-filter-period')?.value || 'today';
-    var fStatus = document.getElementById('att-filter-status')?.value || '';
-    var fName = typeof getEmployeeNameQuery === 'function'
-      ? getEmployeeNameQuery('att-filter-name')
-      : (document.getElementById('att-filter-name')?.value || '').trim().toLowerCase();
-    var filtered = [...attData];
-    if (fDept) filtered = filtered.filter(r => r.dept === fDept);
-    if (fStatus) filtered = filtered.filter(r => r.status === fStatus);
-    if (fName) {
-      filtered = filtered.filter(r =>
-        typeof attendanceRecordMatchesNameQuery === 'function'
-          ? attendanceRecordMatchesNameQuery(r, fName, employees)
-          : String(r.emp || '').toLowerCase().includes(fName)
-      );
-    }
-    if (fPeriod === 'today') filtered = filtered.filter(r => isAttendanceRecordToday(r));
-    else if (fPeriod === 'week') {
-      var wCutoff = new Date(); wCutoff.setDate(wCutoff.getDate() - 6); wCutoff.setHours(0,0,0,0);
-      filtered = filtered.filter(r => { var iso = r.dateIso || r.date_iso || ''; return iso ? new Date(iso) >= wCutoff : false; });
-    }
+    var fFrom = parseIsoDateOnly(document.getElementById('att-filter-from')?.value || '');
+    var fTo = parseIsoDateOnly(document.getElementById('att-filter-to')?.value || '');
+    var filtered = applyAttendanceFilters(attData);
     var statusClass = { 'طبيعي':'status-present','متأخر':'status-late','غياب':'status-absent','إضافي':'status-ot' };
     var headers = ['#','الموظف','القسم','التاريخ','الحضور','الانصراف','ساعات العمل','التأخير','إضافي','الحالة'];
     var rows = filtered.map((r, i) => [
@@ -5420,7 +6992,9 @@ function exportAttPdf() {
       esc(r.ot !== '—' ? r.ot : '—'),
       '<span class="' + (statusClass[r.status] || '') + '">' + esc(r.status || '—') + '</span>'
     ]);
-    var periodLabel = fPeriod === 'today' ? 'اليوم' : fPeriod === 'week' ? 'هذا الأسبوع' : fPeriod === 'month' ? 'هذا الشهر' : 'جميع السجلات';
+    var periodLabel = (fFrom || fTo)
+      ? ('من ' + (fFrom || 'البداية') + ' إلى ' + (fTo || 'النهاية'))
+      : (fPeriod === 'today' ? 'اليوم' : fPeriod === 'week' ? 'هذا الأسبوع' : fPeriod === 'month' ? 'هذا الشهر' : 'جميع السجلات');
     var html = buildPrintPage('تقرير الحضور والانصراف', periodLabel + (fDept ? ' — ' + esc(fDept) : ''), headers, rows, '');
     presentPdfActions(html, 'تقرير_الحضور_' + new Date().toISOString().slice(0, 10) + '.pdf');
   } catch(e) {
@@ -5498,14 +7072,30 @@ function isSalaryHiddenForCurrentPeriod(emp) {
 }
 
 function recordInPeriod(record, period) {
-  if (!record.dateIso) return false;
-  const d = new Date(record.dateIso + 'T12:00:00');
-  return d >= period.start && d <= period.end;
+  if (!record || !period) return false;
+  var iso = typeof attendanceRecordIso === 'function'
+    ? attendanceRecordIso(record)
+    : String(record.dateIso || record.date_iso || '').slice(0, 10);
+  if (!iso || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) return false;
+  var d = new Date(iso + 'T12:00:00');
+  if (isNaN(d.getTime())) return false;
+  var start = period.start instanceof Date ? period.start : new Date(period.start);
+  var end = period.end instanceof Date ? period.end : new Date(period.end);
+  if (isNaN(start.getTime()) || isNaN(end.getTime())) return false;
+  var dayStart = new Date(start.getFullYear(), start.getMonth(), start.getDate(), 0, 0, 0);
+  var dayEnd = new Date(end.getFullYear(), end.getMonth(), end.getDate(), 23, 59, 59);
+  return d >= dayStart && d <= dayEnd;
 }
 
 function parseDurationMinutes(value) {
   const s = String(value || '').trim();
   if (!s || s === '—') return 0;
+  const colonMatch = s.match(/^(\d{1,2}):(\d{2})$/);
+  if (colonMatch) {
+    const h = parseInt(colonMatch[1], 10) || 0;
+    const m = parseInt(colonMatch[2], 10) || 0;
+    return (h * 60) + m;
+  }
   let minutes = 0;
   const hourMatch = s.match(/(\d+)\s*(?:س|h|hour)/i);
   const minMatch = s.match(/(\d+)\s*(?:د|m|min)/i);
@@ -5551,10 +7141,14 @@ function mapServerSalaryPreview(d) {
     loanDeduct: d.loan_deduct || 0,
     loanItems: Array.isArray(d.loan_items) ? d.loan_items : [],
     financeItems: [],
-    final: Math.max(0, d.net_salary != null ? d.net_salary : (baseSalary + bonus - totalDeduct + (otInNet ? otAmount : 0))),
+    final: computeSalaryNetAmount(baseSalary, bonus, totalDeduct, otAmount, otInNet, false),
     attendDays: d.attend_days || 0,
     absentDays: d.absent_days || 0,
     leaveDays: d.leave_days || 0,
+    paidLeaveDays: d.paid_leave_days || 0,
+    leaveCoveredDays: d.leave_covered_days || 0,
+    officialPaidClosureDays: d.official_paid_closure_days || 0,
+    officialUnpaidClosureDays: d.official_unpaid_closure_days || 0,
     totalLateMin: d.late_minutes || 0,
     totalOvertimeMin: d.overtime_minutes || 0,
     isComm: false,
@@ -5583,6 +7177,11 @@ function emptySalaryPreview(emp) {
     final: 0,
     attendDays: 0,
     absentDays: 0,
+    leaveDays: 0,
+    paidLeaveDays: 0,
+    leaveCoveredDays: 0,
+    officialPaidClosureDays: 0,
+    officialUnpaidClosureDays: 0,
     totalLateMin: 0,
     totalOvertimeMin: 0,
     isComm: (emp && emp.salaryType) === 'commission',
@@ -5610,6 +7209,43 @@ function localAbsenceDaysCount(leave) {
   return Math.max(1, Number.isFinite(n) ? n : 1);
 }
 
+function normalizeLeaveType(leave) {
+  var t = String((leave && (leave.leaveType || leave.leave_type || leave.type)) || 'paid_single').trim();
+  if (t === 'annual' || t === 'sick' || t === 'paid') return 'paid_single';
+  if (t === 'unpaid') return 'unpaid_single';
+  return t;
+}
+
+function leaveEffectiveDaysInPeriod(leave, period) {
+  if (!leave || !period) return 0;
+  var fromIso = String(leave.fromDate || leave.from_date || leave.date || '').trim();
+  if (!fromIso) return 0;
+  var leaveType = normalizeLeaveType(leave);
+  if (leaveType === 'paid_open' || leaveType === 'unpaid_open') {
+    var toIso = String(leave.toDate || leave.to_date || fromIso).trim();
+    return leaveDaysInSalaryPeriod(fromIso, toIso, period);
+  }
+  var d = new Date(fromIso + 'T12:00:00');
+  if (isNaN(d.getTime())) return 0;
+  return (d >= period.start && d <= period.end) ? 1 : 0;
+}
+
+function isDateOnEmployeeLeave(empId, dateIso) {
+  if (!empId || !dateIso) return false;
+  var iso = String(dateIso).slice(0, 10);
+  return (window.leavesData || []).some(function (l) {
+    if (!l || String(l.empId || l.employee_id) !== String(empId)) return false;
+    var fromIso = String(l.fromDate || l.from_date || l.date || '').slice(0, 10);
+    if (!fromIso) return false;
+    var leaveType = normalizeLeaveType(l);
+    if (leaveType === 'paid_open' || leaveType === 'unpaid_open') {
+      var toIso = String(l.toDate || l.to_date || fromIso).slice(0, 10);
+      return iso >= fromIso && iso <= toIso;
+    }
+    return iso === fromIso;
+  });
+}
+
 function localLeaveDaysCount(fromDate, toDate) {
   if (!fromDate) return 1;
   if (!toDate) return 1;
@@ -5619,40 +7255,257 @@ function localLeaveDaysCount(fromDate, toDate) {
   return Math.max(1, Math.round((b - a) / 86400000) + 1);
 }
 
-function employeeFinanceSummaryFromVisibleData(emp) {
-  var out = { deductions: 0, bonuses: 0, loans: 0, items: [] };
-  if (!emp) return out;
-  var usedLocalFinance = false;
-  if (typeof financeItems === 'function') {
-    try {
-      financeItems().forEach(function (item) {
-        if (!item || String(item.empId || item.emp_id || item.employee_id) !== String(emp.id) || item.status === 'ملغي' || item.status === 'مسدد') return;
-        var amount = exactMoneyValue(item.amount, 0);
-        if (item.type === 'bonus') out.bonuses += amount;
-        else if (item.type === 'loan') out.loans += item.loanMode === 'installments' && typeof currentLoanInstallmentAmount === 'function' ? currentLoanInstallmentAmount(item) : amount;
-        else if (item.type === 'deduction') out.deductions += amount;
-        out.items.push(item);
-        usedLocalFinance = true;
-      });
-    } catch (e) {}
-  }
-  if (usedLocalFinance) return out;
-  if (emp._financeItemsLoaded === true) return out;
-  var seen = {};
-  (appSettings.employeeNotifications || []).forEach(function (n) {
-    if (!n || String(n.empId) !== String(emp.id)) return;
-    if (n.action === 'delete') return;
-    var key = String(n.financeItemId || n.id || '');
-    if (key && seen[key]) return;
-    if (key) seen[key] = true;
-    var label = String((n.financeType || '') + ' ' + (n.title || '') + ' ' + (n.body || '') + ' ' + (n.note || '')).toLowerCase();
-    var amount = exactMoneyValue(n.amount, 0) || parseMoneyFromText((n.body || '') + ' ' + (n.note || ''));
-    if (!amount) return;
-    if (label.indexOf('bonus') >= 0 || label.indexOf('مكاف') >= 0) out.bonuses += amount;
-    else if (label.indexOf('loan') >= 0 || label.indexOf('سلف') >= 0) out.loans += amount;
-    else if (label.indexOf('deduction') >= 0 || label.indexOf('fine') >= 0 || label.indexOf('خصم') >= 0 || label.indexOf('غرام') >= 0) out.deductions += amount;
+function leaveDaysInSalaryPeriod(fromDate, toDate, period) {
+  if (!fromDate || !period) return 1;
+  var effFrom = new Date(fromDate + 'T12:00:00');
+  var effTo = new Date((toDate || fromDate) + 'T12:00:00');
+  if (isNaN(effFrom.getTime()) || isNaN(effTo.getTime())) return 1;
+  if (effTo < period.start || effFrom > period.end) return 0;
+  var start = effFrom < period.start ? period.start : effFrom;
+  var end = effTo > period.end ? period.end : effTo;
+  return Math.max(1, Math.round((end - start) / 86400000) + 1);
+}
+
+function buildSalaryDeductionBreakdown(emp) {
+  var salaryType = emp.salaryType || 'monthly';
+  var isComm = salaryType === 'commission';
+  var fullPeriod = salaryPeriodInfo(salaryType);
+  var completedPeriod = salaryCompletedPeriodInfo(salaryType);
+  var dailyRate = typeof getEmpDailyRate === 'function' ? getEmpDailyRate(emp) : 0;
+  var base = isComm ? 0 : (parseExactInt(emp.salary, 0) || 0);
+  if (salaryType === 'biweekly') base = parseExactInt(emp.salaryHalf, 0) || Math.round(base / 2);
+  if (!dailyRate && base > 0) dailyRate = Math.round(base / (typeof getStandardMonthDays === 'function' ? getStandardMonthDays() : 30));
+
+  var empHireIso = /^\d{4}-\d{2}-\d{2}/.test(String(emp.hireDate || '')) ? String(emp.hireDate).slice(0, 10) : '';
+
+  var attendDays = 0;
+  var recordedAbsentTotal = 0;
+  var recordedAbsentCompleted = 0;
+  var totalLateMin = 0;
+  var leaveCoveredDays = 0;
+  var paidLeaveDays = 0;
+  var leaveDeduct = 0;
+  var leaveDays = 0;
+  var officialPaidClosureDays = 0;
+  var officialUnpaidClosureDays = 0;
+  var attendSeen = {};
+  var absentSeen = {};
+
+  (attData || []).forEach(function (r) {
+    if (!r || r.empId !== emp.id) return;
+    var dayKey = typeof attendanceRecordIso === 'function'
+      ? attendanceRecordIso(r)
+      : String(r.dateIso || r.date_iso || '').slice(0, 10);
+    if (!dayKey) return;
+    if (!recordInPeriod(r, fullPeriod)) return;
+    var inCompleted = recordInPeriod(r, completedPeriod);
+    var hasCi = !!(r.ci && r.ci !== '—');
+    var hasCo = !!(r.co && r.co !== '—');
+    var closureHit = typeof officialClosureForDate === 'function' ? officialClosureForDate(dayKey) : null;
+
+    if (inCompleted && hasCi && hasCo) {
+      if (!attendSeen[dayKey]) {
+        attendSeen[dayKey] = true;
+        attendDays++;
+      }
+      if (!isComm && !emp.openHours) {
+        totalLateMin += calcAttendanceShortMinutes(emp, r);
+      }
+    }
+
+    // تاريخ المباشرة: لا يُحتسب أي غياب قبله (مطابقة لمنطق الخادم effective_start)
+    var beforeHire = empHireIso && dayKey < empHireIso;
+
+    if (r.status === 'غياب'
+        && !beforeHire
+        && !isDateOnEmployeeLeave(emp.id, dayKey)
+        && !closureHit
+        && !absentSeen[dayKey]) {
+      absentSeen[dayKey] = true;
+      recordedAbsentTotal++;
+      if (inCompleted) recordedAbsentCompleted++;
+    }
   });
-  return out;
+
+  (window.leavesData || []).forEach(function (l) {
+    if (!l || String(l.empId) !== String(emp.id)) return;
+    var fromIso = String(l.fromDate || l.from_date || l.date || '').trim();
+    if (!fromIso) return;
+    var days = leaveEffectiveDaysInPeriod(l, completedPeriod);
+    if (!days) return;
+    var leaveType = normalizeLeaveType(l);
+    leaveCoveredDays += days;
+    if (leaveType === 'paid_single' || leaveType === 'paid_open') {
+      paidLeaveDays += days;
+      return;
+    }
+    if (leaveType === 'unpaid_open') {
+      leaveDays += days;
+      leaveDeduct += Math.round(days * dailyRate);
+    } else if (leaveType === 'unpaid_single') {
+      leaveDays += 1;
+      leaveDeduct += dailyRate;
+    } else if (leaveType === 'absence_mult') {
+      var mult = localAbsenceDaysCount(l);
+      leaveDays += 1;
+      leaveDeduct += Math.round(mult * dailyRate);
+    }
+  });
+
+  var completedFromIso = completedPeriod && completedPeriod.start ? localDateToIso(completedPeriod.start) : '';
+  var completedToIso = completedPeriod && completedPeriod.end ? localDateToIso(completedPeriod.end) : '';
+  officialPaidClosureDays = countOfficialClosureDaysBetween(completedFromIso, completedToIso, 'paid');
+  officialUnpaidClosureDays = countOfficialClosureDaysBetween(completedFromIso, completedToIso, 'unpaid');
+  if (!isComm) {
+    leaveCoveredDays += officialPaidClosureDays + officialUnpaidClosureDays;
+    paidLeaveDays += officialPaidClosureDays;
+    leaveDays += officialUnpaidClosureDays;
+    leaveDeduct += Math.round(officialUnpaidClosureDays * dailyRate);
+  }
+
+  var elapsedWorkDays = salaryPeriodWorkDaysElapsed(salaryType);
+  // تاريخ المباشرة: تبدأ نافذة احتساب الأيام المنقضية من max(بداية الفترة، تاريخ المباشرة)
+  if (empHireIso && !isComm) {
+    var hireClean = parseIsoDateOnly(empHireIso);
+    if (hireClean) {
+      var hireStart = new Date(hireClean + 'T12:00:00');
+      if (hireStart > fullPeriod.start) {
+        var effEnd = completedPeriod && completedPeriod.end ? completedPeriod.end : fullPeriod.end;
+        elapsedWorkDays = (effEnd >= hireStart)
+          ? Math.min(fullPeriod.totalDays || 31, countWorkDaysBetween(hireStart, effEnd))
+          : 0;
+      }
+    }
+  }
+  var expectedAbsent = isComm ? 0 : Math.max(0, elapsedWorkDays - attendDays - recordedAbsentCompleted - leaveCoveredDays);
+  var absentDays = recordedAbsentTotal + expectedAbsent;
+  var lateDeduct = calcLateDeductAmount(emp, totalLateMin, dailyRate);
+  var absentDeduct = isComm ? 0 : Math.round(absentDays * dailyRate);
+  var finance = employeeFinanceSummaryFromVisibleData(emp);
+  var totalDeduct = lateDeduct + absentDeduct + leaveDeduct + finance.deductions + finance.loans;
+
+  return {
+    attendDays: attendDays,
+    absentDays: absentDays,
+    recordedAbsent: recordedAbsentTotal,
+    recordedAbsentCompleted: recordedAbsentCompleted,
+    expectedAbsent: expectedAbsent,
+    leaveCoveredDays: leaveCoveredDays,
+    paidLeaveDays: paidLeaveDays,
+    lateDeduct: lateDeduct,
+    absentDeduct: absentDeduct,
+    leaveDeduct: leaveDeduct,
+    leaveDays: leaveDays,
+    officialPaidClosureDays: officialPaidClosureDays,
+    officialUnpaidClosureDays: officialUnpaidClosureDays,
+    totalLateMin: totalLateMin,
+    manualDeduct: finance.deductions,
+    loanDeduct: finance.loans,
+    bonus: finance.bonuses,
+    totalDeduct: totalDeduct,
+    dailyRate: dailyRate,
+    baseSalary: base,
+    elapsedDays: fullPeriod.elapsedDays
+  };
+}
+
+function formatSalaryDeductionBreakdown(sal) {
+  if (!sal) return '';
+  var parts = [];
+  if ((sal.lateDeduct || 0) > 0) {
+    var lateLabel = 'نقص دوام';
+    if (sal.totalLateMin > 0) lateLabel += ' (' + sal.totalLateMin + ' د)';
+    parts.push(lateLabel + ': ' + sal.lateDeduct.toLocaleString());
+  }
+  if ((sal.absentDeduct || 0) > 0) parts.push('غياب: ' + sal.absentDeduct.toLocaleString());
+  if ((sal.leaveDeduct || 0) > 0) parts.push('إجازات: ' + sal.leaveDeduct.toLocaleString());
+  if ((sal.manualDeduct || 0) > 0) parts.push('خصومات مالية: ' + sal.manualDeduct.toLocaleString());
+  if ((sal.loanDeduct || 0) > 0) parts.push('سلف: ' + sal.loanDeduct.toLocaleString());
+  if ((sal.officialUnpaidClosureDays || 0) > 0) parts.push('تعطيل بدون راتب: ' + sal.officialUnpaidClosureDays + ' يوم');
+  if ((sal.officialPaidClosureDays || 0) > 0) parts.push('تعطيل براتب: ' + sal.officialPaidClosureDays + ' يوم');
+  if ((sal.paidLeaveDays || 0) > 0) parts.push('إجازات مدفوعة: ' + sal.paidLeaveDays + ' يوم');
+  return parts.join(' | ');
+}
+
+function computeSalaryNetAmount(baseSalary, bonus, totalDeduct, ot, otInNet, isComm) {
+  if (isComm) return parseInt(bonus, 10) || 0;
+  return (parseInt(baseSalary, 10) || 0)
+    + (parseInt(bonus, 10) || 0)
+    - (parseInt(totalDeduct, 10) || 0)
+    + (otInNet ? (parseInt(ot, 10) || 0) : 0);
+}
+
+function isSalaryNetNegative(net) {
+  return (parseInt(net, 10) || 0) < 0;
+}
+
+function formatSalaryNetAmount(net, withCurrency) {
+  var n = parseInt(net, 10) || 0;
+  var text = n.toLocaleString();
+  return withCurrency ? text + ' IQD' : text;
+}
+
+function salaryNetNegativeTitle(net) {
+  if (!isSalaryNetNegative(net)) return '';
+  return 'راتب سالب — الخصومات أعلى من الراتب الأساسي والمكافآت. الصافي: ' + formatSalaryNetAmount(net, true);
+}
+
+function salaryNetTableCellHtml(final, isComm) {
+  if (isComm) {
+    return { html: 'يُحسب يدوياً', tdClass: '', tdStyle: 'color:var(--accent);font-weight:700', title: '' };
+  }
+  var formatted = formatSalaryNetAmount(final, false);
+  if (isSalaryNetNegative(final)) {
+    return {
+      html: formatted,
+      tdClass: 'sal-net-negative',
+      tdStyle: '',
+      title: salaryNetNegativeTitle(final)
+    };
+  }
+  return {
+    html: formatted,
+    tdClass: '',
+    tdStyle: 'color:var(--accent);font-weight:700',
+    title: ''
+  };
+}
+
+function salaryNetPdfHtml(net, isComm) {
+  if (isComm) return esc('يُحسب يدوياً');
+  var formatted = formatSalaryNetAmount(net, true);
+  if (!isSalaryNetNegative(net)) {
+    return '<strong style="color:#276749">' + esc(formatted) + '</strong>';
+  }
+  return '<strong class="sal-net-negative-inline" title="' + escAttr(salaryNetNegativeTitle(net)) + '">' + esc(formatted) + ' (سالب)</strong>';
+}
+
+function salaryNetInlineHtml(net, isComm) {
+  if (isComm) return esc('يُحسب يدوياً');
+  var formatted = esc(formatSalaryNetAmount(net, true));
+  if (!isSalaryNetNegative(net)) {
+    return '<b style="color:#68d391">' + formatted + '</b>';
+  }
+  return '<b class="sal-net-negative-inline" title="' + escAttr(salaryNetNegativeTitle(net)) + '">' + formatted + ' (سالب)</b>';
+}
+
+function applySalaryNetElementStyle(el, net, isComm) {
+  if (!el) return;
+  if (isComm || !isSalaryNetNegative(net)) {
+    el.classList.remove('sal-net-negative');
+    el.removeAttribute('title');
+    return;
+  }
+  el.classList.add('sal-net-negative');
+  el.title = salaryNetNegativeTitle(net);
+}
+
+function employeeFinanceSummaryFromVisibleData(emp) {
+  if (!emp) return { deductions: 0, bonuses: 0, loans: 0, items: [] };
+  if (typeof financeTotalsForSalary === 'function') {
+    try { return financeTotalsForSalary(emp); } catch (e) {}
+  }
+  return { deductions: 0, bonuses: 0, loans: 0, items: [] };
 }
 
 function calcEmployeeVisibleSalaryFallback(emp) {
@@ -5660,44 +7513,29 @@ function calcEmployeeVisibleSalaryFallback(emp) {
   if (!emp) return empty;
   var salaryType = emp.salaryType || 'monthly';
   var isComm = salaryType === 'commission';
-  var base = isComm ? 0 : (parseExactInt(emp.salary, 0) || 0);
-  if (salaryType === 'biweekly') base = parseExactInt(emp.salaryHalf, 0) || Math.round(base / 2);
-  var dailyRate = typeof getEmpDailyRate === 'function' ? getEmpDailyRate(emp) : 0;
-  if (!dailyRate && base > 0) dailyRate = Math.round(base / (typeof getStandardMonthDays === 'function' ? getStandardMonthDays() : 30));
-  var finance = employeeFinanceSummaryFromVisibleData(emp);
-  var leaveDeduct = 0;
-  var leaveDays = 0;
-  var absentDeduct = 0;
-  var absentDays = 0;
-  (window.leavesData || []).forEach(function (l) {
-    if (!l || String(l.empId) !== String(emp.id)) return;
-    var days = 1;
-    if (l.leaveType === 'unpaid_open') days = localLeaveDaysCount(l.fromDate, l.toDate);
-    if (l.leaveType === 'unpaid_open') {
-      leaveDays += days;
-      leaveDeduct += Math.round(days * dailyRate);
-    } else if (l.leaveType === 'unpaid_single') {
-      leaveDays += 1;
-      leaveDeduct += dailyRate;
-    } else if (l.leaveType === 'absence_mult') {
-      days = localAbsenceDaysCount(l);
-      absentDays += days;
-      absentDeduct += Math.round(days * dailyRate);
-    }
-  });
-  var totalDeduct = finance.deductions + finance.loans + leaveDeduct + absentDeduct;
+  var breakdown = buildSalaryDeductionBreakdown(emp);
   return Object.assign(empty, {
-    baseSalary: base,
-    totalDeduct: totalDeduct,
-    manualDeduct: finance.deductions,
-    loanDeduct: finance.loans,
-    leaveDeduct: leaveDeduct,
-    leaveDays: leaveDays,
-    absentDeduct: absentDeduct,
-    absentDays: absentDays,
-    bonus: finance.bonuses,
-    final: isComm ? finance.bonuses : Math.max(0, base + finance.bonuses - totalDeduct),
-    dailyRate: dailyRate,
+    baseSalary: breakdown.baseSalary,
+    totalDeduct: breakdown.totalDeduct,
+    lateDeduct: breakdown.lateDeduct,
+    absentDeduct: breakdown.absentDeduct,
+    leaveDeduct: breakdown.leaveDeduct,
+    leaveDays: breakdown.leaveDays,
+    officialPaidClosureDays: breakdown.officialPaidClosureDays,
+    officialUnpaidClosureDays: breakdown.officialUnpaidClosureDays,
+    paidLeaveDays: breakdown.paidLeaveDays,
+    leaveCoveredDays: breakdown.leaveCoveredDays,
+    attendDays: breakdown.attendDays,
+    absentDays: breakdown.absentDays,
+    totalLateMin: breakdown.totalLateMin,
+    manualDeduct: breakdown.manualDeduct,
+    loanDeduct: breakdown.loanDeduct,
+    bonus: breakdown.bonus,
+    final: isComm ? breakdown.bonus : computeSalaryNetAmount(breakdown.baseSalary, breakdown.bonus, breakdown.totalDeduct, 0, false, false),
+    dailyRate: breakdown.dailyRate,
+    elapsedDays: breakdown.elapsedDays,
+    isComm: isComm,
+    isBiw: salaryType === 'biweekly',
     _localVisibleCalc: true,
     _pendingServerCalc: false
   });
@@ -5706,6 +7544,7 @@ function calcEmployeeVisibleSalaryFallback(emp) {
 async function prefetchSalaryPreviews(empList) {
   if (typeof kynoRequiresServerSalary === 'function' ? !kynoRequiresServerSalary() : (typeof isKynoRpcMode !== 'function' || !isKynoRpcMode())) return;
   if (typeof sb_previewSalary !== 'function') return;
+  _salaryPreviewCache = {};
   if (typeof currentUser !== 'undefined' && currentUser === 'emp') return;
   if (typeof AuthApi !== 'undefined' && AuthApi.hasAuthenticatedSession) {
     try {
@@ -5756,6 +7595,42 @@ function calcEmpSalary(emp) {
   if (cached && cached.ok !== false) {
     var mapped = mapServerSalaryPreview(cached);
     if (mapped) {
+      // Safety net: ignore server late fields when they are stale. Recompute
+      // late minutes and deduction from visible attendance records.
+      var localBreakdown = buildSalaryDeductionBreakdown(emp);
+      var correctedLate = localBreakdown.lateDeduct || 0;
+      mapped.totalLateMin = localBreakdown.totalLateMin || 0;
+      mapped.lateDeduct = correctedLate;
+      mapped.absentDeduct = localBreakdown.absentDeduct || 0;
+      mapped.leaveDeduct = localBreakdown.leaveDeduct || 0;
+      mapped.attendDays = localBreakdown.attendDays || 0;
+      mapped.absentDays = localBreakdown.absentDays || 0;
+      mapped.leaveDays = localBreakdown.leaveDays || 0;
+      mapped.paidLeaveDays = localBreakdown.paidLeaveDays || 0;
+      mapped.leaveCoveredDays = localBreakdown.leaveCoveredDays || 0;
+      mapped.officialPaidClosureDays = localBreakdown.officialPaidClosureDays || 0;
+      mapped.officialUnpaidClosureDays = localBreakdown.officialUnpaidClosureDays || 0;
+      mapped.manualDeduct = localBreakdown.manualDeduct || 0;
+      mapped.loanDeduct = localBreakdown.loanDeduct || 0;
+      mapped.bonus = localBreakdown.bonus || 0;
+      mapped.totalDeduct = Math.max(
+        0,
+        (mapped.lateDeduct || 0) +
+        (mapped.absentDeduct || 0) +
+        (mapped.leaveDeduct || 0) +
+        (mapped.manualDeduct || 0) +
+        (mapped.loanDeduct || 0)
+      );
+      if ((emp.salaryType || 'monthly') !== 'commission') {
+        mapped.final = computeSalaryNetAmount(
+          mapped.baseSalary,
+          mapped.bonus,
+          mapped.totalDeduct,
+          mapped.ot,
+          mapped.overtimeInNet,
+          false
+        );
+      }
       mapped.isComm = (emp.salaryType || 'monthly') === 'commission';
       mapped.isBiw = (emp.salaryType || 'monthly') === 'biweekly';
       emp.days = mapped.attendDays;
@@ -5896,7 +7771,7 @@ function normalizePaidSalaryRecord(row, empHint) {
   var deduct = parseExactInt(row.deduct != null ? row.deduct : (row.total_deduct != null ? row.total_deduct : row.deductions), 0);
   var bonus = parseExactInt(row.bonus, 0);
   var net = parseExactInt(row.net != null ? row.net : (row.final != null ? row.final : row.net_salary), 0);
-  if (!net) net = Math.max(0, base + bonus + ot - deduct);
+  if (!net && net !== 0) net = base + bonus + ot - deduct;
   return {
     id: row.id || ('sal_' + monthIso + '_' + emp.id),
     employeeId: emp.id,
@@ -5940,7 +7815,7 @@ function paidSalaryRecordFromHiddenMarker(emp) {
     ot: 0,
     deduct: 0,
     bonus: bonus,
-    net: Math.max(0, base + bonus),
+    net: base + bonus,
     status: 'مدفوع',
     isRecovered: true,
     source: { status: 'مدفوع', monthIso: period, paidAt: marker.at || '' }
@@ -6055,10 +7930,13 @@ function buildSalaries() {
     const typeLabel = isComm ? '<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(246,224,94,0.15);color:#f6e05e;margin-right:4px">\u0639\u0645\u0648\u0644\u0629</span>' : (isBiw ? '<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(99,179,237,0.15);color:#63b3ed;margin-right:4px">15 \u064A\u0648\u0645</span>' : '');
     const sal = calcEmpSalary(e);
     const deduct = sal.totalDeduct;
-    const ot = sal.ot;
+    const ot = sal.overtimeInNet ? (sal.ot || 0) : 0;
     const bonus = sal.bonus;
     const baseSalary = sal.baseSalary;
     const final = sal.final;
+    const finalCell = salaryNetTableCellHtml(final, isComm);
+    const deductBreakdown = formatSalaryDeductionBreakdown(sal);
+    const deductTitle = 'إجمالي الخصومات = ' + (deduct || 0).toLocaleString() + ' IQD' + (deductBreakdown ? '\n' + deductBreakdown : '');
     const salStatus = e.salStatus || '\u0645\u0639\u0644\u0642';
     return '<tr>' +
       '<td>' + (i + 1) + '</td>' +
@@ -6066,10 +7944,10 @@ function buildSalaries() {
       '<td>' + esc(e.dept) + '</td>' +
       '<td>' + salaryPeriodDateFromKey(salaryPeriodKey(e.salaryType || 'monthly')) + '</td>' +
       '<td>' + (isComm ? '\u0639\u0645\u0648\u0644\u0629' : baseSalary.toLocaleString()) + '</td>' +
-      '<td style="color:' + (isComm ? 'var(--text-muted)' : (deduct>0?'#fc8181':'var(--text-muted)')) + '">' + (isComm ? '\u2014' : (deduct > 0 ? deduct.toLocaleString() : '\u2014')) + '</td>' +
-      '<td style="color:' + (isComm ? 'var(--text-muted)' : (ot>0?'#63b3ed':'var(--text-muted)')) + '">' + (isComm ? '\u2014' : (ot > 0 ? ot.toLocaleString() + (sal.overtimeInNet ? '' : ' \u2020') : '\u2014')) + '</td>' +
+      '<td title="' + escAttr(deductTitle) + '" style="color:' + (isComm ? 'var(--text-muted)' : (deduct>0?'#fc8181':'var(--text-muted)')) + '">' + (isComm ? '\u2014' : (deduct > 0 ? deduct.toLocaleString() : '\u2014')) + '</td>' +
+      '<td style="color:' + (isComm ? 'var(--text-muted)' : (ot>0?'#63b3ed':'var(--text-muted)')) + '">' + (isComm ? '\u2014' : (ot > 0 ? ot.toLocaleString() : '\u2014')) + '</td>' +
       '<td style="color:' + (bonus>0?'#f6e05e':'var(--text-muted)') + '">' + (bonus > 0 ? bonus.toLocaleString() : '\u2014') + '</td>' +
-      '<td style="color:var(--accent);font-weight:700">' + (isComm ? '\u064A\u064F\u062D\u0633\u0628 \u064A\u062F\u0648\u064A\u0627\u064B' : final.toLocaleString()) + '</td>' +
+      '<td class="' + escAttr(finalCell.tdClass) + '" style="' + escAttr(finalCell.tdStyle) + '" title="' + escAttr(finalCell.title) + '">' + finalCell.html + '</td>' +
       '<td><span class="badge ' + escClass(salStatus, statusMap, 'badge-warning') + '">' + esc(statusIcon[salStatus] || '') + ' ' + esc(salStatus) + '</span></td>' +
       '<td>' +
         (hasActionPermission('salaries', 'edit') ? '<button class="btn-sm btn-primary" style="padding:5px 10px;margin:2px" onclick="editSalary(' + e.id + ')" title="\u062A\u0639\u062F\u064A\u0644"><i class="fa fa-edit"></i></button>' : '') +
@@ -6115,6 +7993,7 @@ function buildPaidSalaries() {
     return;
   }
   tbody.innerHTML = rows.map(function (rec, i) {
+    var netCell = salaryNetTableCellHtml(rec.net, false);
     return '<tr>' +
       '<td>' + (i + 1) + '</td>' +
       '<td><strong>' + esc(rec.empName) + '</strong></td>' +
@@ -6126,7 +8005,7 @@ function buildPaidSalaries() {
       '<td style="color:' + (rec.deduct > 0 ? '#fc8181' : 'var(--text-muted)') + '">' + (rec.deduct > 0 ? rec.deduct.toLocaleString() : '—') + '</td>' +
       '<td style="color:' + (rec.ot > 0 ? '#63b3ed' : 'var(--text-muted)') + '">' + (rec.ot > 0 ? rec.ot.toLocaleString() : '—') + '</td>' +
       '<td style="color:' + (rec.bonus > 0 ? '#f6e05e' : 'var(--text-muted)') + '">' + (rec.bonus > 0 ? rec.bonus.toLocaleString() : '—') + '</td>' +
-      '<td style="color:var(--accent);font-weight:700">' + rec.net.toLocaleString() + '</td>' +
+      '<td class="' + escAttr(netCell.tdClass) + '" style="' + escAttr(netCell.tdStyle) + '" title="' + escAttr(netCell.title) + '">' + netCell.html + '</td>' +
       '<td>' +
         (hasActionPermission('salaries', 'paid_view') ? '<button class="btn-sm btn-primary" style="padding:5px 10px;margin:2px" onclick="viewPaidSalaryRecord(' + escAttr(JSON.stringify(rec.employeeId)) + ',' + escAttr(JSON.stringify(rec.monthIso)) + ')" title="معاينة"><i class="fa fa-eye"></i></button>' : '') +
         (hasActionPermission('salaries', 'paid_edit') ? '<button class="btn-sm btn-primary" style="padding:5px 10px;margin:2px" onclick="editPaidSalaryRecord(' + escAttr(JSON.stringify(rec.employeeId)) + ',' + escAttr(JSON.stringify(rec.monthIso)) + ')" title="تعديل"><i class="fa fa-edit"></i></button>' : '') +
@@ -6142,7 +8021,7 @@ function editSalary(empId) {
   if (!e) return;
   const sal = calcEmpSalary(e);
   const deduct = sal.totalDeduct;
-  const ot = sal.ot;
+  const ot = sal.overtimeInNet ? (sal.ot || 0) : 0;
   const bonus = sal.bonus;
   const final = sal.final;
   const salStatus = e.salStatus || '\u0645\u0639\u0644\u0642';
@@ -6163,14 +8042,14 @@ function editSalary(empId) {
       '<div class="emp-field"><label>\u0627\u0644\u0645\u0643\u0627\u0641\u0622\u062A (IQD)</label><input type="number" id="sal-bonus" value="' + bonus + '" min="0"></div>' +
       '</div>' +
       '<div class="emp-field-row">' +
-      '<div class="emp-field"><label>\u062E\u0635\u0645 \u062A\u0623\u062E\u064A\u0631 (IQD)</label><input type="number" id="sal-deduct" value="' + sal.lateDeduct + '" min="0" readonly style="opacity:0.6"></div>' +
+      '<div class="emp-field"><label>خصم نقص دوام (IQD)</label><input type="number" id="sal-deduct" value="' + sal.lateDeduct + '" min="0" readonly style="opacity:0.6"></div>' +
       '<div class="emp-field"><label>\u0625\u0636\u0627\u0641\u064A (IQD)</label><input type="number" id="sal-ot" value="' + ot + '" min="0" readonly style="opacity:0.6"></div>' +
       '<div class="emp-field"><label>خصم غياب (' + sal.absentDays + ' يوم) (IQD)</label><input type="number" id="sal-absent-deduct" value="' + sal.absentDeduct + '" min="0" readonly style="opacity:0.6"></div>' +
       '<div class="emp-field"><label>خصم إجازات غير مدفوعة (IQD)</label><input type="number" id="sal-leave-deduct" value="' + (sal.leaveDeduct || 0) + '" min="0" readonly style="opacity:0.6;color:' + ((sal.leaveDeduct || 0) > 0 ? '#f6ad55' : '') + '"></div>' +
       '</div>' +
       '<div class="emp-field-row">' +
       '<div class="emp-field"><label>إجمالي الخصومات (IQD)</label><input type="number" id="sal-total-deduct" value="' + deduct + '" min="0" readonly style="opacity:0.6;color:#fc8181;font-weight:700"></div>' +
-      '<div class="emp-field"><label>\u0627\u0644\u0635\u0627\u0641\u064A (IQD)</label><input id="sal-final" value="' + final.toLocaleString() + '" readonly style="opacity:0.6;color:var(--accent);font-weight:700"></div>' +
+      '<div class="emp-field"><label>\u0627\u0644\u0635\u0627\u0641\u064A (IQD)</label><input id="sal-final" value="' + formatSalaryNetAmount(final, false) + '" readonly style="opacity:0.6;' + (isSalaryNetNegative(final) ? 'color:#fff;background:rgba(197,48,48,0.92);font-weight:700' : 'color:var(--accent);font-weight:700') + '" title="' + escAttr(salaryNetNegativeTitle(final)) + '"></div>' +
       '<div class="emp-field"><label>\u0627\u0644\u062D\u0627\u0644\u0629</label><select id="sal-status">' + statusOpts + '</select></div>' +
       '</div></div></div>',
     ...swalTheme(), showCancelButton: true,
@@ -6260,18 +8139,32 @@ function viewSalary(empIdOrName) {
   if (!e) return;
   const sal = calcEmpSalary(e);
   const deduct = sal.totalDeduct;
-  const ot = sal.ot;
+  const ot = sal.overtimeInNet ? (sal.ot || 0) : 0;
   const bonus = sal.bonus;
   const final = sal.final;
+  const lateDeduct = sal.lateDeduct || 0;
+  const absentDeduct = sal.absentDeduct || 0;
+  const leaveDeduct = sal.leaveDeduct || 0;
+  const manualDeduct = sal.manualDeduct || 0;
+  const loanDeduct = sal.loanDeduct || 0;
   const salStatus = e.salStatus || '\u0645\u0639\u0644\u0642';
   Swal.fire({ icon: 'info', title: '\u0643\u0634\u0641 \u0631\u0627\u062A\u0628: ' + esc(e.name),
     html: '<div style="text-align:right;font-family:Cairo,sans-serif;line-height:2.2;font-size:14px">' +
       '<div>\uD83D\uDCCB <strong>\u0627\u0644\u0642\u0633\u0645:</strong> ' + esc(e.dept) + '</div>' +
       '<div>\uD83D\uDCB0 <strong>\u0627\u0644\u0631\u0627\u062A\u0628 \u0627\u0644\u0623\u0633\u0627\u0633\u064A:</strong> <b>' + e.salary.toLocaleString() + '</b> IQD</div>' +
-      '<div>\u2795 <strong>\u0627\u0644\u0625\u0636\u0627\u0641\u064A:</strong> <b style="color:#63b3ed">' + (ot > 0 ? ot.toLocaleString() : '0') + '</b> IQD <span style="font-size:12px;color:var(--text-muted)">(منفصل عن الصافي)</span></div>' +
+      '<div>\u2795 <strong>\u0627\u0644\u0625\u0636\u0627\u0641\u064A:</strong> <b style="color:#63b3ed">' + (ot > 0 ? ot.toLocaleString() : '—') + '</b> IQD' + (sal.overtimeInNet ? '' : ' <span style="font-size:12px;color:var(--text-muted)">(غير مُفعل من بطاقة الموظف)</span>') + '</div>' +
       '<div>\uD83C\uDFC6 <strong>\u0627\u0644\u0645\u0643\u0627\u0641\u0622\u062A:</strong> <b style="color:#f6e05e">' + (bonus > 0 ? bonus.toLocaleString() : '0') + '</b> IQD</div>' +
+      '<hr style="border-color:rgba(255,255,255,0.12);margin:8px 0">' +
+      '<div style="font-weight:700;color:#fc8181">تفصيل الخصومات</div>' +
+      '<div><strong>خصم نقص دوام:</strong> ' + (lateDeduct > 0 ? lateDeduct.toLocaleString() : '0') + ' IQD</div>' +
+      '<div><strong>خصم غياب:</strong> ' + (absentDeduct > 0 ? absentDeduct.toLocaleString() : '0') + ' IQD</div>' +
+      '<div><strong>خصم إجازات:</strong> ' + (leaveDeduct > 0 ? leaveDeduct.toLocaleString() : '0') + ' IQD</div>' +
+      '<div><strong>إجازات مدفوعة (بدون خصم):</strong> ' + ((sal.paidLeaveDays || 0) > 0 ? sal.paidLeaveDays + ' يوم' : '0') + '</div>' +
+      '<div><strong>أيام مغطاة بإجازة:</strong> ' + ((sal.leaveCoveredDays || 0) > 0 ? sal.leaveCoveredDays + ' يوم' : '0') + '</div>' +
+      '<div><strong>خصومات مالية:</strong> ' + (manualDeduct > 0 ? manualDeduct.toLocaleString() : '0') + ' IQD</div>' +
+      '<div><strong>استقطاع سلف:</strong> ' + (loanDeduct > 0 ? loanDeduct.toLocaleString() : '0') + ' IQD</div>' +
       '<div>\u2796 <strong>\u062E\u0635\u0648\u0645\u0627\u062A:</strong> <b style="color:#fc8181">' + (deduct > 0 ? deduct.toLocaleString() : '0') + '</b> IQD</div>' +
-      '<div>\uD83D\uDCB5 <strong>\u0627\u0644\u0635\u0627\u0641\u064A:</strong> <b style="color:#68d391">' + final.toLocaleString() + '</b> IQD</div>' +
+      '<div>\uD83D\uDCB5 <strong>\u0627\u0644\u0635\u0627\u0641\u064A:</strong> ' + salaryNetInlineHtml(final, false) + '</div>' +
       '<div>\uD83D\uDCCC <strong>\u0627\u0644\u062D\u0627\u0644\u0629:</strong> ' + esc(salStatus) + '</div>' +
       '</div>',
     ...swalTheme() });
@@ -6303,7 +8196,7 @@ function viewPaidSalaryRecord(employeeId, monthIso) {
       '<div><strong>الإضافي:</strong> ' + rec.ot.toLocaleString() + ' IQD</div>' +
       '<div><strong>المكافآت:</strong> ' + rec.bonus.toLocaleString() + ' IQD</div>' +
       '<div><strong>الخصومات:</strong> ' + rec.deduct.toLocaleString() + ' IQD</div>' +
-      '<div><strong>الصافي:</strong> <b style="color:var(--accent)">' + rec.net.toLocaleString() + '</b> IQD</div>' +
+      '<div><strong>الصافي:</strong> ' + salaryNetInlineHtml(rec.net, false) + '</div>' +
       '</div>',
     ...swalTheme()
   });
@@ -6432,7 +8325,7 @@ function editPaidSalaryRecord(employeeId, monthIso) {
       var ot = readMoneyValue('paid-edit-ot', 0);
       var bonus = readMoneyValue('paid-edit-bonus', 0);
       var deduct = readMoneyValue('paid-edit-deduct', 0);
-      return { newStatus: newStatus, paidDate: paidDate, base: base, ot: ot, bonus: bonus, deduct: deduct, net: Math.max(0, base + ot + bonus - deduct) };
+      return { newStatus: newStatus, paidDate: paidDate, base: base, ot: ot, bonus: bonus, deduct: deduct, net: base + ot + bonus - deduct };
     }
   }).then(async function (r) {
     if (!r.isConfirmed || !r.value) return;
@@ -6647,12 +8540,12 @@ function exportSalPdf() {
         sal.totalDeduct > 0 ? '<span style="color:#c53030">' + sal.totalDeduct.toLocaleString() + '</span>' : '—',
         sal.ot > 0 ? '<span style="color:#2b6cb0">' + sal.ot.toLocaleString() + '</span>' : '—',
         sal.bonus > 0 ? '<span style="color:#b7791f">' + sal.bonus.toLocaleString() + '</span>' : '—',
-        '<strong style="color:#276749">' + sal.final.toLocaleString() + ' IQD</strong>',
+        salaryNetPdfHtml(sal.final, (e.salaryType || 'monthly') === 'commission'),
         '<span style="' + (statusColor[salStatus] || '') + ';font-weight:700">' + esc(salStatus) + '</span>'
       ];
     });
     var html = buildPrintPage('كشف الرواتب', esc(fDept || 'جميع الأقسام') + (fStatus ? ' — ' + esc(fStatus) : ''), headers, rows,
-      'table{min-width:600px} .report-header{background:linear-gradient(135deg,#1a3a5c,#0f2240);color:#fff;border-radius:12px;padding:24px} .company-name,.report-title,.report-date{color:#fff}');
+      'table{min-width:600px} .report-header{background:linear-gradient(135deg,#1a3a5c,#0f2240);color:#fff;border-radius:12px;padding:24px} .company-name,.report-title,.report-date{color:#fff} .sal-net-negative-inline{background:#c53030;color:#fff;padding:4px 10px;border-radius:6px}');
     presentPdfActions(html, 'كشف_الرواتب_' + new Date().toISOString().slice(0, 10) + '.pdf');
   } catch(e) {
     console.error('exportSalPdf error:', e);
@@ -6714,10 +8607,15 @@ function exportSalExcel() {
 }
 
 // ======= FINANCE ADJUSTMENTS =======
+function getAppSettingsStore() {
+  return (typeof window !== 'undefined' && window.appSettings) ? window.appSettings : appSettings;
+}
+
 function financeItems() {
-  if (!Array.isArray(appSettings.financeItems)) appSettings.financeItems = [];
-  appSettings.financeItems.forEach(normalizeFinanceItem);
-  return appSettings.financeItems;
+  var store = getAppSettingsStore();
+  if (!Array.isArray(store.financeItems)) store.financeItems = [];
+  store.financeItems.forEach(normalizeFinanceItem);
+  return store.financeItems;
 }
 
 function normalizeFinanceItem(item) {
@@ -6726,6 +8624,16 @@ function normalizeFinanceItem(item) {
     item.id = 'fin_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
   }
   item.empId = parseInt(item.empId != null ? item.empId : (item.emp_id != null ? item.emp_id : item.employee_id), 10) || item.empId;
+  var typeRaw = String(item.type || '').trim();
+  var typeKey = typeRaw.toLowerCase();
+  var typeMap = {
+    deduction: 'deduction', bonus: 'bonus', loan: 'loan', deduct: 'deduction', reward: 'bonus', advance: 'loan',
+    '\u062e\u0635\u0645': 'deduction', '\u0645\u0643\u0627\u0641\u0623\u0629': 'bonus', '\u0645\u0643\u0627\u0641\u0622\u062a': 'bonus',
+    '\u0633\u0644\u0641\u0629': 'loan', '\u0633\u0644\u0641': 'loan'
+  };
+  if (typeMap[typeRaw]) item.type = typeMap[typeRaw];
+  else if (typeMap[typeKey]) item.type = typeMap[typeKey];
+  item.date = item.date ? String(item.date).slice(0, 10) : (item.createdAt ? String(item.createdAt).slice(0, 10) : '');
   item.amount = exactMoneyValue(item.amount, 0);
   item.installmentCount = Math.max(1, exactMoneyValue(item.installmentCount, 1));
   item.paidInstallments = Math.max(0, exactMoneyValue(item.paidInstallments, 0));
@@ -6754,11 +8662,22 @@ function financePeriodForEmp(emp) {
   return salaryPeriodKey((emp && emp.salaryType) || 'monthly');
 }
 
+function financeItemAppliesToPeriod(item, period) {
+  if (!item || !period) return false;
+  var iperiod = String(item.period || '').trim();
+  if (!iperiod) return true;
+  if (iperiod === period) return true;
+  return iperiod.slice(0, 7) === String(period).slice(0, 7);
+}
+
 function financeItemAppliesToSalary(item, emp) {
   if (!item || String(item.empId) !== String(emp.id) || item.status === 'ملغي' || item.status === 'مسدد') return false;
   const period = financePeriodForEmp(emp);
-  if (item.type === 'loan' && item.loanMode === 'installments') return item.status !== 'مسدد';
-  return !item.period || item.period === period;
+  if (item.type === 'loan') {
+    if (item.loanMode === 'installments') return item.status !== 'مسدد';
+    return financeItemAppliesToPeriod(item, period);
+  }
+  return financeItemAppliesToPeriod(item, period);
 }
 
 function financeTotalsForSalary(emp) {
@@ -6804,6 +8723,17 @@ function applyLoanInstallmentsOnIssue() {
 }
 
 function buildFinancePage() {
+  var renderFinancePage = function () {
+    buildFinancePageNow();
+  };
+  if (typeof hydrateFinanceItemsFromCloud === 'function') {
+    hydrateFinanceItemsFromCloud({ forceRemote: true, replace: true }).then(renderFinancePage).catch(renderFinancePage);
+    return;
+  }
+  renderFinancePage();
+}
+
+function buildFinancePageNow() {
   const tbody = document.getElementById('finance-table');
   const empFilter = document.getElementById('fin-filter-emp');
   if (!tbody) return;
@@ -6814,7 +8744,7 @@ function buildFinancePage() {
   }
   const typeFilter = document.getElementById('fin-filter-type')?.value || '';
   const empIdFilter = parseInt(document.getElementById('fin-filter-emp')?.value || '0', 10);
-  const list = financeItems().filter(item => (!typeFilter || item.type === typeFilter) && (!empIdFilter || item.empId === empIdFilter));
+  const list = financeItems().filter(item => (!typeFilter || item.type === typeFilter) && (!empIdFilter || String(item.empId) === String(empIdFilter)));
   const totalDeduct = financeItems().filter(i => i.type === 'deduction' && i.status !== 'ملغي').reduce((s,i) => s + exactMoneyValue(i.amount,0), 0);
   const totalBonus = financeItems().filter(i => i.type === 'bonus' && i.status !== 'ملغي').reduce((s,i) => s + exactMoneyValue(i.amount,0), 0);
   const totalLoans = financeItems().filter(i => i.type === 'loan' && i.status !== 'مسدد' && i.status !== 'ملغي').reduce((s,i) => s + exactMoneyValue(i.amount,0), 0);
@@ -6825,7 +8755,7 @@ function buildFinancePage() {
   if (bEl) bEl.textContent = totalBonus.toLocaleString();
   if (lEl) lEl.textContent = totalLoans.toLocaleString();
   if (!list.length) {
-    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:28px;color:var(--text-muted)">لا توجد حركات مالية</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:28px;color:var(--text-muted)">لا توجد حركات مالية</td></tr>';
     return;
   }
   const typeLabel = { deduction:'خصم', bonus:'مكافأة', loan:'سلفة' };
@@ -6834,7 +8764,11 @@ function buildFinancePage() {
     const installment = item.type === 'loan' && item.loanMode === 'installments'
       ? ((item.paidInstallments || 0) + '/' + (item.installmentCount || 1) + ' × ' + currentLoanInstallmentAmount(item).toLocaleString())
       : '—';
-    return '<tr><td>' + (i + 1) + '</td><td>' + esc(emp ? emp.name : 'موظف محذوف') + '</td><td>' + esc(typeLabel[item.type] || item.type) + '</td><td>' + exactMoneyValue(item.amount,0).toLocaleString() + '</td><td>' + esc(installment) + '</td><td>' + esc(item.status || 'نشط') + '</td><td>' + esc(item.note || '—') + '</td><td>' +
+    const dayName = arabicDayNameFromDate(item.date);
+    const dateCell = item.date
+      ? esc(String(item.date).slice(0, 10)) + (dayName ? '<br><span style="font-size:11px;color:var(--text-muted)">' + esc(dayName) + '</span>' : '')
+      : '—';
+    return '<tr><td>' + (i + 1) + '</td><td>' + esc(emp ? emp.name : 'موظف محذوف') + '</td><td>' + dateCell + '</td><td>' + esc(typeLabel[item.type] || item.type) + '</td><td>' + exactMoneyValue(item.amount,0).toLocaleString() + '</td><td>' + esc(installment) + '</td><td>' + esc(item.status || 'نشط') + '</td><td>' + esc(item.note || '—') + '</td><td>' +
       (hasActionPermission('finance', 'edit') ? '<button class="btn-sm btn-primary" onclick="openFinanceItemForm(' + escAttr(JSON.stringify(item.id)) + ')"><i class="fa fa-edit"></i></button>' : '') +
       (hasActionPermission('finance', 'delete') ? '<button class="btn-sm btn-danger" onclick="deleteFinanceItem(' + escAttr(JSON.stringify(item.id)) + ')"><i class="fa fa-trash"></i></button>' : '') +
       '</td></tr>';
@@ -6851,6 +8785,7 @@ function openFinanceItemForm(id) {
       '<div class="emp-field"><label>الموظف</label><select id="fin-emp" class="setting-input">' + empOpts + '</select></div>' +
       '<div class="emp-field"><label>النوع</label><select id="fin-type" class="setting-input" onchange="document.getElementById(\'fin-loan-box\').style.display=this.value===\'loan\'?\'\':\'none\'"><option value="deduction"' + (existing?.type === 'deduction' ? ' selected' : '') + '>خصم</option><option value="bonus"' + (existing?.type === 'bonus' ? ' selected' : '') + '>مكافأة</option><option value="loan"' + (existing?.type === 'loan' ? ' selected' : '') + '>سلفة</option></select></div>' +
       '<div class="emp-field"><label>المبلغ</label><input type="number" id="fin-amount" class="setting-input" min="0" value="' + (existing ? existing.amount : '') + '"></div>' +
+      '<div class="emp-field"><label>التاريخ</label><input type="date" id="fin-date" class="setting-input" value="' + (existing && existing.date ? esc(String(existing.date).slice(0, 10)) : (typeof todayIsoDate === 'function' ? todayIsoDate() : '')) + '"><span class="emp-field-hint">يُشتق اسم اليوم تلقائياً من التاريخ.</span></div>' +
       '<div id="fin-loan-box" style="display:' + (existing?.type === 'loan' ? '' : 'none') + '">' +
       '<div class="emp-field"><label>طريقة السلفة</label><select id="fin-loan-mode" class="setting-input"><option value="direct"' + (existing?.loanMode !== 'installments' ? ' selected' : '') + '>استقطاع مباشر من الراتب</option><option value="installments"' + (existing?.loanMode === 'installments' ? ' selected' : '') + '>على شكل دفعات</option></select></div>' +
       '<div class="emp-field-row"><div class="emp-field"><label>مبلغ الدفعة</label><input type="number" id="fin-installment-amount" class="setting-input" min="0" value="' + (existing?.installmentAmount || '') + '"></div><div class="emp-field"><label>عدد الدفعات</label><input type="number" id="fin-installment-count" class="setting-input" min="1" value="' + (existing?.installmentCount || 1) + '"></div></div>' +
@@ -6866,23 +8801,43 @@ function openFinanceItemForm(id) {
       const installmentCount = Math.max(1, readMoneyValue('fin-installment-count', 1));
       const installmentAmount = readMoneyValue('fin-installment-amount', 0) || Math.floor(amount / installmentCount);
       const note = document.getElementById('fin-note')?.value.trim() || '';
+      const date = (document.getElementById('fin-date')?.value || '').slice(0, 10);
       if (!empId) { Swal.showValidationMessage('اختر الموظف'); return false; }
       if (!amount) { Swal.showValidationMessage('أدخل المبلغ'); return false; }
       const emp = employees.find(e => e.id === empId);
-      return { empId, type, amount, originalAmount: amount, loanMode, installmentCount, installmentAmount, note, period: financePeriodForEmp(emp), status: 'نشط' };
+      return { empId, type, amount, originalAmount: amount, loanMode, installmentCount, installmentAmount, note, date, period: financePeriodForEmp(emp), status: 'نشط' };
     }
   }).then(async r => {
     if (!r.isConfirmed || !r.value) return;
-    var item = existing ? normalizeFinanceItem(Object.assign(existing, r.value)) : normalizeFinanceItem({ id: Date.now(), createdAt: new Date().toISOString(), paidInstallments: 0, ...r.value });
+    pauseRemoteSync(18000);
+    window.__basmaLocalSettingsAt = Date.now();
+    var prevItem = existing ? Object.assign({}, existing) : null;
+    var item = existing ? normalizeFinanceItem(Object.assign(existing, r.value, { updatedAt: new Date().toISOString() })) : normalizeFinanceItem({ id: Date.now(), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), paidInstallments: 0, ...r.value });
     if (!existing) financeItems().unshift(item);
+    if (typeof clearSalaryCacheForEmployee === 'function') clearSalaryCacheForEmployee(item.empId);
     var emp = employees.find(function(e) { return e.id === item.empId; });
     var typeLabel = NOTIF_FINANCE_LABELS[item.type] || item.type;
     logActivity(existing ? 'edit' : 'add', 'finance', (existing ? 'تعديل' : 'إضافة') + ' ' + typeLabel + ' للموظف: ' + (emp ? emp.name : '') + ' — ' + exactMoneyValue(item.amount, 0).toLocaleString() + ' IQD', { targetName: emp ? emp.name : '', empId: item.empId, targetEmpId: item.empId });
     notifyEmployeeFinance(item.empId, item.type, existing ? 'edit' : 'add', item.amount, item.note, item.id);
-    await persistSalaryDeletedMapNow();
+    var cloud = await persistSalaryDeletedMapNow();
+    if (!cloud || cloud.ok !== true) {
+      if (existing && prevItem) {
+        Object.assign(existing, prevItem);
+      } else {
+        var rollbackIdx = financeItems().findIndex(function(i) { return String(i.id) === String(item.id); });
+        if (rollbackIdx >= 0) financeItems().splice(rollbackIdx, 1);
+      }
+      if (typeof clearSalaryCacheForEmployee === 'function') clearSalaryCacheForEmployee(item.empId);
+      saveData();
+      refreshAll();
+      resumeRemoteSync(0);
+      Swal.fire({ icon:'warning', title:'تعذّر الحفظ في السحابة', text:'لم تُحفظ الحركة نهائياً حتى لا تختفي بعد المزامنة. أعد تسجيل الدخول ثم حاول مرة أخرى.', ...swalTheme() });
+      return;
+    }
     if (typeof persistNotificationsNow === 'function') await persistNotificationsNow();
     saveData();
     refreshAll();
+    resumeRemoteSync(9000);
     Swal.fire({ icon:'success', title:'تم حفظ الحركة المالية', ...swalTheme(), timer:1400, showConfirmButton:false });
   });
 }
@@ -6927,14 +8882,46 @@ function deleteFinanceItem(id) {
 function exportFinanceReport() {
   if (!requireActionPermission('finance', 'export')) return;
   logActivity('export', 'finance', 'تصدير تقرير الحركات المالية Excel');
+  const finTypeLabel = { deduction:'خصم', bonus:'مكافأة', loan:'سلفة' };
   const rows = financeItems().map(item => {
     const emp = employees.find(e => e.id === item.empId);
-    return { 'الموظف': emp ? emp.name : '', 'النوع': item.type, 'المبلغ': exactMoneyValue(item.amount,0), 'الحالة': item.status, 'الأقساط': (item.paidInstallments || 0) + '/' + (item.installmentCount || 1), 'ملاحظة': item.note || '' };
+    return { 'الموظف': emp ? emp.name : '', 'التاريخ': item.date ? String(item.date).slice(0, 10) : '', 'اليوم': arabicDayNameFromDate(item.date), 'النوع': finTypeLabel[item.type] || item.type, 'المبلغ': exactMoneyValue(item.amount,0), 'الحالة': item.status, 'الأقساط': (item.paidInstallments || 0) + '/' + (item.installmentCount || 1), 'ملاحظة': item.note || '' };
   });
   if (typeof XLSX === 'undefined') { Swal.fire({ icon:'info', title:'تقرير الحركات المالية', text:'عدد الحركات: ' + rows.length, ...swalTheme() }); return; }
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Finance');
   XLSX.writeFile(wb, 'finance_report.xlsx');
+}
+
+// المرحلة 4 — طباعة تقرير الحركات المالية (يشمل التاريخ واسم اليوم) وفق الفلاتر الحالية
+function printFinanceReport() {
+  if (!requireActionPermission('finance', 'export')) return;
+  const typeFilter = document.getElementById('fin-filter-type')?.value || '';
+  const empIdFilter = parseInt(document.getElementById('fin-filter-emp')?.value || '0', 10);
+  const list = financeItems().filter(item => (!typeFilter || item.type === typeFilter) && (!empIdFilter || String(item.empId) === String(empIdFilter)));
+  if (!list.length) { Swal.fire({ icon:'info', title:'لا توجد حركات', text:'لا توجد حركات مالية للطباعة.', ...swalTheme() }); return; }
+  const finTypeLabel = { deduction:'خصم', bonus:'مكافأة', loan:'سلفة' };
+  const headers = ['#','الموظف','التاريخ','اليوم','النوع','المبلغ','الأقساط','الحالة','الملاحظات'];
+  const rows = list.map((item, i) => {
+    const emp = employees.find(e => e.id === item.empId);
+    const installment = item.type === 'loan' && item.loanMode === 'installments'
+      ? ((item.paidInstallments || 0) + '/' + (item.installmentCount || 1) + ' × ' + currentLoanInstallmentAmount(item).toLocaleString())
+      : '—';
+    return [
+      String(i + 1),
+      esc(emp ? emp.name : 'موظف محذوف'),
+      item.date ? esc(String(item.date).slice(0, 10)) : '—',
+      esc(arabicDayNameFromDate(item.date) || '—'),
+      esc(finTypeLabel[item.type] || item.type),
+      exactMoneyValue(item.amount, 0).toLocaleString() + ' IQD',
+      esc(installment),
+      esc(item.status || 'نشط'),
+      esc(item.note || '—')
+    ];
+  });
+  logActivity('export', 'finance', 'طباعة تقرير الحركات المالية');
+  const html = buildPrintPage('تقرير الحركات المالية', 'الخصومات والمكافآت والسلف', headers, rows, 'table{min-width:720px}');
+  presentPdfActions(html, 'finance_report_' + new Date().toISOString().slice(0, 10) + '.pdf');
 }
 
 function buildOrgPage() {
@@ -7050,9 +9037,9 @@ function openOrgItemForm(type, idx) {
       });
     } else {
       Swal.fire({
-        icon: 'warning',
-        title: 'تم الحفظ محلياً',
-        html: '«' + esc(val) + '» ظهر في القائمة على هذا الجهاز.<br><span style="font-size:12px;color:var(--text-muted)">لم يُرفع للسحابة — أعد تسجيل الدخول للمزامنة.</span>',
+        icon: 'error',
+        title: 'لم يتم الحفظ',
+        html: 'تعذّر حفظ «' + esc(val) + '» في السحابة.<br><span style="font-size:12px;color:var(--text-muted)">تحقق من الإنترنت أو أعد تسجيل الدخول ثم حاول مرة أخرى.</span>',
         ...swalTheme(),
         timer: 3500,
         showConfirmButton: false
@@ -7180,17 +9167,9 @@ function getPlatformWhatsAppRaw(kind) {
   if (kind === 'team') {
     var team = ps.supportWhatsAppTeam ? String(ps.supportWhatsAppTeam).trim() : '';
     if (team) return team;
-    try {
-      team = localStorage.getItem('platform_support_whatsapp_team') || '';
-      if (team) return team.trim();
-    } catch (e) {}
   }
   var sub = ps.supportWhatsApp ? String(ps.supportWhatsApp).trim() : '';
   if (sub) return sub;
-  try {
-    sub = localStorage.getItem('platform_support_whatsapp') || '';
-    if (sub) return sub.trim();
-  } catch (e) {}
   if (appSettings && appSettings.supportWhatsAppUrl) return String(appSettings.supportWhatsAppUrl).trim();
   return '07733344940';
 }
@@ -7283,10 +9262,6 @@ function getNotificationScopeId() {
     var activeCid = getActiveStorageCompanyId();
     if (activeCid) return activeCid;
   }
-  try {
-    var stored = parseInt(localStorage.getItem('basma_employee_company_id') || '0', 10);
-    if (stored > 0) return stored;
-  } catch (e) { /* ignore */ }
   return null;
 }
 
@@ -7539,6 +9514,14 @@ function formatNotifDateTime(ts) {
   return { date: date, time: time, full: date + ' — ' + time, dayKey: dayKey, relative: formatNotifTime(ts) };
 }
 
+// المرحلة 4 — اسم اليوم العربي من تاريخ YYYY-MM-DD (اشتقاق تلقائي، عرض فقط)
+function arabicDayNameFromDate(dateStr) {
+  if (!dateStr) return '';
+  var d = new Date(String(dateStr).slice(0, 10) + 'T12:00:00');
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('ar-IQ', { weekday: 'long' });
+}
+
 function formatNotifDayLabel(dayKey) {
   if (!dayKey) return 'بدون تاريخ';
   var d = new Date(dayKey + 'T12:00:00');
@@ -7723,6 +9706,12 @@ function dismissEmployeeNotification(notifId) {
   var target = (appSettings.employeeNotifications || []).find(function (x) {
     return x && (String(x.id) === String(notifId) || String(x._remoteId || '') === String(notifId) || employeeNotificationKey(x) === String(notifId));
   });
+  if (target && typeof markEmployeeFinanceRailDismissed === 'function') markEmployeeFinanceRailDismissed(target);
+  if (!target && notifId) {
+    var store = employeeRailDismissStore();
+    store[String(notifId)] = '*';
+    persistEmployeeRailDismissStore();
+  }
   var targetKey = employeeNotificationKey(target) || '';
   var targetSig = employeeNotificationSignature(target) || '';
   var changed = false;
@@ -7753,31 +9742,109 @@ function dismissEmployeeNotification(notifId) {
   if (typeof buildNotifications === 'function' && document.getElementById('page-notifications')?.classList.contains('active')) buildNotifications();
 }
 
+function employeeNotifRailStamp(notif) {
+  if (!notif) return '';
+  return String(notif.ts != null ? notif.ts : (notif.created_at || notif.id || ''));
+}
+
+function employeeRailDismissStore() {
+  window.__basmaDismissedFinanceRail = window.__basmaDismissedFinanceRail || {};
+  try {
+    var raw = sessionStorage.getItem('basma_dismissed_emp_finance_rail');
+    if (raw) {
+      var parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        Object.assign(window.__basmaDismissedFinanceRail, parsed);
+      }
+    }
+  } catch (e) { /* ignore */ }
+  return window.__basmaDismissedFinanceRail;
+}
+
+function persistEmployeeRailDismissStore() {
+  try {
+    sessionStorage.setItem('basma_dismissed_emp_finance_rail', JSON.stringify(window.__basmaDismissedFinanceRail || {}));
+  } catch (e) { /* ignore */ }
+}
+
+function markEmployeeFinanceRailDismissed(notif) {
+  if (!notif || notif.id == null) return;
+  var store = employeeRailDismissStore();
+  var stamp = employeeNotifRailStamp(notif) || String(Date.now());
+  store[String(notif.id)] = stamp;
+  if (notif._remoteId != null) store[String(notif._remoteId)] = stamp;
+  var key = typeof employeeNotificationKey === 'function' ? employeeNotificationKey(notif) : '';
+  if (key) store[key] = stamp;
+  persistEmployeeRailDismissStore();
+}
+
+function isEmployeeFinanceRailDismissed(notif) {
+  if (!notif || notif.id == null) return false;
+  var store = employeeRailDismissStore();
+  var stamp = employeeNotifRailStamp(notif);
+  if (!stamp) return false;
+  var key = typeof employeeNotificationKey === 'function' ? employeeNotificationKey(notif) : '';
+  return store[String(notif.id)] === '*' || store[String(notif.id)] === stamp ||
+    (notif._remoteId != null && (store[String(notif._remoteId)] === '*' || store[String(notif._remoteId)] === stamp)) ||
+    (key && (store[key] === '*' || store[key] === stamp));
+}
+
+function getLoggedInEmployeeCompanyId() {
+  var sess = window.__basmaEmpSession;
+  if (sess && sess.companyId != null) {
+    var sid = parseInt(sess.companyId, 10);
+    if (sid > 0) return sid;
+  }
+  var emp = typeof getLoggedInEmp === 'function' ? getLoggedInEmp() : null;
+  if (emp && emp.company_id != null) {
+    var cid = parseInt(emp.company_id, 10);
+    if (cid > 0) return cid;
+  }
+  return null;
+}
+
+var _empFinanceRailRenderSig = '';
+
 function renderEmployeeFinanceNotificationsRail() {
   var rail = document.getElementById('employee-finance-notifications-rail');
   if (!rail) return;
-  rail.innerHTML = '';
   if (currentUser !== 'emp') {
+    rail.innerHTML = '';
     rail.style.display = 'none';
+    _empFinanceRailRenderSig = '';
     return;
   }
   ensureNotifStores();
   var emp = typeof getLoggedInEmp === 'function' ? getLoggedInEmp() : null;
   if (!emp) {
+    rail.innerHTML = '';
     rail.style.display = 'none';
+    _empFinanceRailRenderSig = '';
     return;
   }
   var sid = String(emp.id);
+  var empCid = getLoggedInEmployeeCompanyId();
   var items = dedupeEmployeeNotifications((appSettings.employeeNotifications || []).filter(function (n) {
     if (!n || String(n.empId) !== sid) return false;
+    if (empCid && n.companyId != null && parseInt(n.companyId, 10) !== empCid) return false;
+    if (isEmployeeFinanceRailDismissed(n)) return false;
     var unread = n.unread !== undefined ? !!n.unread : !n.read;
     if (!unread) return false;
     return !!(n.financeType || n.type === 'leave' || n.title || n.body);
   })).slice(0, 3);
+  var sig = items.map(function (n) {
+    return String(n.id || n._remoteId || '') + ':' + employeeNotifRailStamp(n);
+  }).join('|');
   if (!items.length) {
-    rail.style.display = 'none';
+    if (_empFinanceRailRenderSig !== '' || rail.innerHTML) {
+      rail.innerHTML = '';
+      rail.style.display = 'none';
+      _empFinanceRailRenderSig = '';
+    }
     return;
   }
+  if (sig === _empFinanceRailRenderSig && rail.innerHTML) return;
+  _empFinanceRailRenderSig = sig;
   rail.style.display = '';
   rail.innerHTML = items.map(function (n) {
     var visual = n.type === 'leave' || n.financeType === 'leave' || n.financeType === 'absence'
@@ -7803,6 +9870,369 @@ function renderEmployeeFinanceNotificationsRail() {
 }
 window.renderEmployeeFinanceNotificationsRail = renderEmployeeFinanceNotificationsRail;
 window.dismissEmployeeNotification = dismissEmployeeNotification;
+window.dismissEmployeeFinanceRailNotification = dismissEmployeeNotification;
+
+/* =========================================================================
+ * إشعارات البثّ للموظفين (Broadcast Notices)
+ * رسالة يحددها المسؤول تظهر لجميع الموظفين مع زر إغلاق، وتتكرر تلقائياً
+ * حسب مدة زمنية (دقيقة/ساعة/يوم). تُخزّن ضمن appSettings.broadcastNotices
+ * وتُزامن كباقي الإعدادات (نفس نمط الحركات المالية).
+ * ========================================================================= */
+
+function broadcastNoticesArr() {
+  if (!Array.isArray(appSettings.broadcastNotices)) appSettings.broadcastNotices = [];
+  return appSettings.broadcastNotices;
+}
+
+function normalizeBroadcastNotice(n) {
+  n = n || {};
+  // وحدة التكرار (كل كم يظهر الإشعار من جديد بعد إغلاقه)
+  var repeatUnitRaw = n.repeatUnit != null ? n.repeatUnit : n.intervalUnit;
+  var repeatUnit = (repeatUnitRaw === 'minute' || repeatUnitRaw === 'hour' || repeatUnitRaw === 'day') ? repeatUnitRaw : 'hour';
+  var repeatValue = parseInt(n.repeatValue != null ? n.repeatValue : n.intervalValue, 10);
+  if (!Number.isFinite(repeatValue) || repeatValue < 0) repeatValue = 0;
+  // عدد الأيام التي يبقى الإشعار فعّالاً/متكرراً خلالها (0 = بدون حد زمني)
+  var durationDays = parseInt(n.durationDays, 10);
+  if (!Number.isFinite(durationDays) || durationDays < 0) durationDays = 0;
+  var nowIso = new Date().toISOString();
+  return {
+    id: n.id || ('bc_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7)),
+    message: String(n.message || '').slice(0, 1000),
+    durationDays: durationDays,
+    repeatValue: repeatValue,
+    repeatUnit: repeatUnit,
+    active: n.active !== false,
+    createdAt: n.createdAt || nowIso,
+    updatedAt: n.updatedAt || nowIso
+  };
+}
+
+// صياغة عربية دقيقة لمعدّل التكرار: كل ساعة / كل ساعتين / كل 3 ساعات / كل 15 ساعة ...
+function broadcastRepeatPhrase(value, unit) {
+  var n = parseInt(value, 10);
+  if (!Number.isFinite(n) || n <= 0) return 'مرة واحدة فقط (بدون تكرار)';
+  var forms = {
+    minute: { one: 'كل دقيقة', two: 'كل دقيقتين', few: 'دقائق', many: 'دقيقة' },
+    hour: { one: 'كل ساعة', two: 'كل ساعتين', few: 'ساعات', many: 'ساعة' },
+    day: { one: 'كل يوم', two: 'كل يومين', few: 'أيام', many: 'يوماً' }
+  };
+  var f = forms[unit] || forms.hour;
+  if (n === 1) return f.one;
+  if (n === 2) return f.two;
+  if (n >= 3 && n <= 10) return 'كل ' + n + ' ' + f.few;
+  return 'كل ' + n + ' ' + f.many;
+}
+
+// صياغة عربية لعدد الأيام: يوم واحد / يومين / 3 أيام / 15 يوماً
+function arabicDaysCount(value) {
+  var n = parseInt(value, 10);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  if (n === 1) return 'يوم واحد';
+  if (n === 2) return 'يومين';
+  if (n >= 3 && n <= 10) return n + ' أيام';
+  return n + ' يوماً';
+}
+
+// ملخّص كامل للإشعار: "يظهر كل ساعة لمدة 5 أيام" أو "... بدون حد زمني"
+function broadcastSummaryPhrase(n) {
+  var repeat = (parseInt(n && n.repeatValue, 10) > 0)
+    ? ('يظهر ' + broadcastRepeatPhrase(n.repeatValue, n.repeatUnit))
+    : 'يظهر مرة واحدة فقط';
+  var days = parseInt(n && n.durationDays, 10);
+  var span = (Number.isFinite(days) && days > 0) ? ('لمدة ' + arabicDaysCount(days)) : 'بدون حد زمني (دائم)';
+  return repeat + ' — ' + span;
+}
+
+// مدة التكرار بالميلي ثانية (كل كم يعاد الإظهار بعد الإغلاق)
+function broadcastRepeatMs(n) {
+  var v = parseInt(n && n.repeatValue, 10);
+  if (!Number.isFinite(v) || v <= 0) return 0;
+  var per = n.repeatUnit === 'minute' ? 60000 : n.repeatUnit === 'day' ? 86400000 : 3600000;
+  return v * per;
+}
+
+// نهاية نافذة صلاحية الإشعار بالإبوك (Infinity إذا كان دائماً)
+function broadcastWindowEndMs(n) {
+  var days = parseInt(n && n.durationDays, 10);
+  if (!Number.isFinite(days) || days <= 0) return Infinity;
+  var base = new Date(n.updatedAt || n.createdAt || Date.now()).getTime();
+  if (!Number.isFinite(base)) base = Date.now();
+  return base + days * 86400000;
+}
+
+async function saveBroadcastNoticesSettings(message) {
+  appSettings.broadcastNotices = broadcastNoticesArr().map(normalizeBroadcastNotice);
+  if (typeof logActivity === 'function') logActivity('edit', 'settings', message || 'تعديل إشعارات البث للموظفين', { deferSave: true });
+  var cloud = await commitAppSettingsToCloud({ pauseMs: 30000, resumeMs: 15000 });
+  return cloud || { ok: false };
+}
+
+async function openBroadcastNoticeForm(id) {
+  if (!requireActionPermission('settings', 'edit')) return;
+  var current = broadcastNoticesArr().find(function (n) { return n.id === id; }) || null;
+  var curDays = current ? parseInt(current.durationDays, 10) : 1;
+  if (!Number.isFinite(curDays) || curDays < 0) curDays = 1;
+  var curRepeat = current ? parseInt(current.repeatValue, 10) : 1;
+  if (!Number.isFinite(curRepeat) || curRepeat < 0) curRepeat = 1;
+  var curUnit = current ? current.repeatUnit : 'hour';
+  var fieldWrap = 'style="text-align:right;padding:12px 14px;margin:0 0 12px;border:1px solid var(--border);border-radius:12px;background:rgba(255,255,255,0.03)"';
+  var numStyle = 'style="width:96px;margin:0;text-align:center;font-size:16px;font-weight:700"';
+  var html = '<div style="text-align:right;direction:rtl">' +
+    // نص الرسالة
+    '<div ' + fieldWrap + '>' +
+      '<label class="setting-label" style="display:block;margin-bottom:4px;font-weight:700"><i class="fa fa-comment-dots" style="margin-left:6px;color:#dd6b20"></i> نص الرسالة</label>' +
+      '<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;line-height:1.6">الرسالة التي ستظهر لجميع الموظفين داخل تطبيقهم.</div>' +
+      '<textarea id="bc-message" class="swal2-textarea" style="width:100%;margin:0;min-height:88px;box-sizing:border-box" placeholder="اكتب نص الإشعار هنا...">' + esc(current ? current.message : '') + '</textarea>' +
+    '</div>' +
+    // عدد الأيام (نافذة الصلاحية)
+    '<div ' + fieldWrap + '>' +
+      '<label class="setting-label" style="display:block;margin-bottom:4px;font-weight:700"><i class="fa fa-calendar-days" style="margin-left:6px;color:#dd6b20"></i> عدد الأيام</label>' +
+      '<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;line-height:1.6">عدد الأيام التي يبقى الإشعار يتكرر خلالها. مثال: 5 = يظل يظهر لمدة 5 أيام ثم يتوقف. اكتب 0 لجعله دائماً بلا حد زمني.</div>' +
+      '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">' +
+        '<input id="bc-duration-days" type="number" min="0" max="365" step="1" class="swal2-input" ' + numStyle + ' value="' + esc(curDays) + '">' +
+        '<span style="font-size:14px;color:var(--text-muted)">يوم</span>' +
+      '</div>' +
+    '</div>' +
+    // وقت التكرار
+    '<div ' + fieldWrap + '>' +
+      '<label class="setting-label" style="display:block;margin-bottom:4px;font-weight:700"><i class="fa fa-repeat" style="margin-left:6px;color:#dd6b20"></i> وقت التكرار</label>' +
+      '<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;line-height:1.6">كل كم من الوقت يظهر الإشعار من جديد بعد أن يغلقه الموظف. مثال: كل ساعة. اكتب 0 لعرضه مرة واحدة فقط دون تكرار.</div>' +
+      '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">' +
+        '<span style="font-size:14px;color:var(--text-muted)">يتكرّر كل</span>' +
+        '<input id="bc-repeat-value" type="number" min="0" max="999" step="1" class="swal2-input" ' + numStyle + ' value="' + esc(curRepeat) + '">' +
+        '<select id="bc-repeat-unit" class="swal2-select" style="width:120px;margin:0">' +
+          '<option value="minute"' + (curUnit === 'minute' ? ' selected' : '') + '>دقيقة</option>' +
+          '<option value="hour"' + (curUnit === 'hour' ? ' selected' : '') + '>ساعة</option>' +
+          '<option value="day"' + (curUnit === 'day' ? ' selected' : '') + '>يوم</option>' +
+        '</select>' +
+      '</div>' +
+      '<div id="bc-interval-preview" style="margin-top:10px;padding:8px 12px;border-radius:8px;background:rgba(221,107,32,0.14);color:#f6ad55;font-weight:700;font-size:13px;text-align:center"></div>' +
+    '</div>' +
+    // الحالة
+    '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:10px 14px;border:1px solid var(--border);border-radius:12px;background:rgba(255,255,255,0.03)"><input id="bc-active" type="checkbox"' + (!current || current.active !== false ? ' checked' : '') + '> <span style="font-weight:700">مُفعّل — يظهر للموظفين الآن</span></label>' +
+    '</div>';
+  var res = await Swal.fire({
+    title: current ? 'تعديل الإشعار' : 'إشعار جديد للموظفين',
+    html: html,
+    width: 480,
+    showCancelButton: true,
+    confirmButtonText: 'حفظ',
+    cancelButtonText: 'إلغاء',
+    focusConfirm: false,
+    didOpen: function () {
+      var daysEl = document.getElementById('bc-duration-days');
+      var repEl = document.getElementById('bc-repeat-value');
+      var unitEl = document.getElementById('bc-repeat-unit');
+      var preview = document.getElementById('bc-interval-preview');
+      function updatePreview() {
+        if (!preview) return;
+        preview.textContent = '\u2192 ' + broadcastSummaryPhrase({
+          repeatValue: parseInt(repEl && repEl.value, 10),
+          repeatUnit: (unitEl && unitEl.value) || 'hour',
+          durationDays: parseInt(daysEl && daysEl.value, 10)
+        });
+      }
+      if (daysEl) daysEl.addEventListener('input', updatePreview);
+      if (repEl) repEl.addEventListener('input', updatePreview);
+      if (unitEl) unitEl.addEventListener('change', updatePreview);
+      updatePreview();
+    },
+    preConfirm: function () {
+      var message = (document.getElementById('bc-message')?.value || '').trim();
+      var days = parseInt(document.getElementById('bc-duration-days')?.value, 10);
+      var rep = parseInt(document.getElementById('bc-repeat-value')?.value, 10);
+      var unit = document.getElementById('bc-repeat-unit')?.value || 'hour';
+      var active = !!(document.getElementById('bc-active') && document.getElementById('bc-active').checked);
+      if (!message) return Swal.showValidationMessage('اكتب نص الرسالة');
+      if (!Number.isFinite(days) || days < 0) days = 0;
+      if (days > 365) return Swal.showValidationMessage('أقصى عدد للأيام هو 365');
+      if (!Number.isFinite(rep) || rep < 0) rep = 0;
+      if (rep > 999) return Swal.showValidationMessage('أقصى قيمة لوقت التكرار هي 999');
+      return { message: message, durationDays: days, repeatValue: rep, repeatUnit: unit, active: active };
+    },
+    ...swalTheme()
+  });
+  if (!res.isConfirmed || !res.value) return;
+  var nowIso = new Date().toISOString();
+  var notice = normalizeBroadcastNotice({
+    id: current ? current.id : null,
+    message: res.value.message,
+    durationDays: res.value.durationDays,
+    repeatValue: res.value.repeatValue,
+    repeatUnit: res.value.repeatUnit,
+    active: res.value.active,
+    createdAt: current ? current.createdAt : nowIso,
+    updatedAt: nowIso
+  });
+  var next = broadcastNoticesArr().filter(function (n) { return n.id !== notice.id; });
+  next.unshift(notice);
+  appSettings.broadcastNotices = next;
+  var cloud = await saveBroadcastNoticesSettings((current ? 'تعديل' : 'إضافة') + ' إشعار بث للموظفين');
+  renderBroadcastNoticesList();
+  Swal.fire({
+    icon: cloud.ok ? 'success' : 'error',
+    title: cloud.ok ? 'تم الحفظ' : 'تعذّر الحفظ في السحابة',
+    text: cloud.ok ? 'سيظهر الإشعار لجميع الموظفين.' : 'لم يُحفظ الإشعار في Supabase. أعد تسجيل الدخول كمسؤول ثم احفظ مرة أخرى.',
+    timer: cloud.ok ? 2200 : undefined,
+    showConfirmButton: !cloud.ok,
+    ...swalTheme()
+  });
+}
+
+async function toggleBroadcastNoticeActive(id) {
+  if (!requireActionPermission('settings', 'edit')) return;
+  var current = broadcastNoticesArr().find(function (n) { return n.id === id; });
+  if (!current) return;
+  current.active = current.active === false;
+  current.updatedAt = new Date().toISOString();
+  renderBroadcastNoticesList();
+  await saveBroadcastNoticesSettings((current.active ? 'تفعيل' : 'إيقاف') + ' إشعار بث للموظفين');
+}
+
+async function deleteBroadcastNotice(id) {
+  if (!requireActionPermission('settings', 'edit')) return;
+  var current = broadcastNoticesArr().find(function (n) { return n.id === id; });
+  if (!current) return;
+  var res = await Swal.fire({ icon: 'warning', title: 'حذف الإشعار؟', text: current.message, showCancelButton: true, confirmButtonText: 'حذف', cancelButtonText: 'إلغاء', ...swalTheme() });
+  if (!res.isConfirmed) return;
+  appSettings.broadcastNotices = broadcastNoticesArr().filter(function (n) { return n.id !== id; });
+  renderBroadcastNoticesList();
+  var cloud = await saveBroadcastNoticesSettings('حذف إشعار بث للموظفين');
+  Swal.fire({ icon: cloud.ok ? 'success' : 'error', title: cloud.ok ? 'تم الحذف' : 'تعذّر الحذف من السحابة', timer: cloud.ok ? 1600 : undefined, showConfirmButton: !cloud.ok, ...swalTheme() });
+}
+
+function renderBroadcastNoticesList() {
+  var wrap = document.getElementById('broadcast-notices-list');
+  if (!wrap) return;
+  var list = broadcastNoticesArr().map(normalizeBroadcastNotice);
+  appSettings.broadcastNotices = list;
+  if (!list.length) {
+    wrap.innerHTML = '<div class="settings-hint" style="padding:10px;border:1px dashed var(--border);border-radius:10px">لا توجد إشعارات محفوظة حالياً.</div>';
+    return;
+  }
+  wrap.innerHTML = list.map(function (n) {
+    var repeatText = broadcastSummaryPhrase(n);
+    var statusColor = n.active !== false ? '#68d391' : '#fc8181';
+    var statusText = n.active !== false ? 'مُفعّل' : 'موقوف';
+    return '<div style="display:flex;gap:8px;align-items:center;justify-content:space-between;padding:10px;margin-top:8px;border:1px solid var(--border);border-radius:10px;background:rgba(255,255,255,0.03)">' +
+      '<div style="line-height:1.7;flex:1;min-width:0"><b style="display:block;word-break:break-word">' + esc(n.message) + '</b>' +
+      '<div style="font-size:12px;color:var(--text-muted)">' + esc(repeatText) + ' — <span style="color:' + statusColor + ';font-weight:700">' + statusText + '</span></div></div>' +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
+      '<button type="button" class="btn-sm" data-perm="settings.edit" onclick="toggleBroadcastNoticeActive(\'' + esc(n.id) + '\')" title="' + (n.active !== false ? 'إيقاف' : 'تفعيل') + '"><i class="fa ' + (n.active !== false ? 'fa-toggle-on' : 'fa-toggle-off') + '"></i></button>' +
+      '<button type="button" class="btn-sm btn-primary" data-perm="settings.edit" onclick="openBroadcastNoticeForm(\'' + esc(n.id) + '\')" title="تعديل"><i class="fa fa-edit"></i></button>' +
+      '<button type="button" class="btn-sm btn-danger" data-perm="settings.edit" onclick="deleteBroadcastNotice(\'' + esc(n.id) + '\')" title="حذف"><i class="fa fa-trash"></i></button></div>' +
+      '</div>';
+  }).join('');
+  if (typeof applyPermissionUi === 'function') applyPermissionUi();
+}
+
+function broadcastDismissStoreKey() {
+  var cid = typeof getLoggedInEmployeeCompanyId === 'function' ? getLoggedInEmployeeCompanyId() : null;
+  return 'basma_emp_broadcast_dismiss_' + (cid || 'x');
+}
+
+function broadcastDismissStore() {
+  try {
+    if (window.BasmaStorage && typeof BasmaStorage.safeGet === 'function') {
+      var v = BasmaStorage.safeGet(broadcastDismissStoreKey(), true);
+      if (v && typeof v === 'object') return v;
+      return {};
+    }
+    var raw = localStorage.getItem(broadcastDismissStoreKey());
+    var parsed = raw ? JSON.parse(raw) : {};
+    return (parsed && typeof parsed === 'object') ? parsed : {};
+  } catch (e) { return {}; }
+}
+
+function persistBroadcastDismissStore(store) {
+  try {
+    if (window.BasmaStorage && typeof BasmaStorage.safeSet === 'function') {
+      BasmaStorage.safeSet(broadcastDismissStoreKey(), store || {});
+    } else {
+      localStorage.setItem(broadcastDismissStoreKey(), JSON.stringify(store || {}));
+    }
+  } catch (e) { /* ignore */ }
+}
+
+function isBroadcastDismissed(notice) {
+  if (!notice || notice.id == null) return false;
+  var rec = broadcastDismissStore()[String(notice.id)];
+  if (!rec) return false;
+  // إذا عدّل المسؤول الإشعار (تغيّر updatedAt) نعيد إظهاره
+  if (rec.stamp && notice.updatedAt && rec.stamp !== notice.updatedAt) return false;
+  var until = parseInt(rec.until, 10);
+  if (!Number.isFinite(until)) return false;
+  return Date.now() < until;
+}
+
+function dismissBroadcastNotice(id) {
+  var notice = broadcastNoticesArr().find(function (n) { return String(n.id) === String(id); });
+  var store = broadcastDismissStore();
+  var ms = notice ? broadcastRepeatMs(notice) : 0;
+  var until = ms > 0 ? (Date.now() + ms) : Number.MAX_SAFE_INTEGER;
+  store[String(id)] = { until: until, stamp: notice ? notice.updatedAt : '' };
+  persistBroadcastDismissStore(store);
+  renderEmployeeBroadcastRail();
+}
+
+var _empBroadcastRailSig = '';
+
+function renderEmployeeBroadcastRail() {
+  var rail = document.getElementById('employee-broadcast-rail');
+  if (!rail) return;
+  if (currentUser !== 'emp') {
+    rail.innerHTML = '';
+    rail.style.display = 'none';
+    _empBroadcastRailSig = '';
+    return;
+  }
+  var emp = typeof getLoggedInEmp === 'function' ? getLoggedInEmp() : null;
+  if (!emp) {
+    rail.innerHTML = '';
+    rail.style.display = 'none';
+    _empBroadcastRailSig = '';
+    return;
+  }
+  var nowMs = Date.now();
+  var items = broadcastNoticesArr().filter(function (n) {
+    if (!n || n.active === false || !String(n.message || '').trim()) return false;
+    if (nowMs >= broadcastWindowEndMs(n)) return false;
+    return !isBroadcastDismissed(n);
+  });
+  var sig = items.map(function (n) { return String(n.id) + ':' + (n.updatedAt || ''); }).join('|');
+  if (!items.length) {
+    if (_empBroadcastRailSig !== '' || rail.innerHTML) {
+      rail.innerHTML = '';
+      rail.style.display = 'none';
+      _empBroadcastRailSig = '';
+    }
+    return;
+  }
+  if (sig === _empBroadcastRailSig && rail.innerHTML) return;
+  _empBroadcastRailSig = sig;
+  rail.style.display = 'flex';
+  rail.innerHTML = items.map(function (n) {
+    return '<div class="platform-ann-card">' +
+      '<button type="button" class="platform-ann-close" data-broadcast-id="' + escAttr(String(n.id)) + '" aria-label="إغلاق">&times;</button>' +
+      '<div class="platform-ann-head"><i class="fa fa-bullhorn"></i><span>إشعار من الإدارة</span></div>' +
+      '<div class="platform-ann-text">' + esc(n.message) + '</div>' +
+    '</div>';
+  }).join('');
+  rail.querySelectorAll('.platform-ann-close').forEach(function (btn) {
+    safeAddEvent(btn, 'click', function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      dismissBroadcastNotice(btn.getAttribute('data-broadcast-id') || '');
+    });
+  });
+}
+
+window.openBroadcastNoticeForm = openBroadcastNoticeForm;
+window.toggleBroadcastNoticeActive = toggleBroadcastNoticeActive;
+window.deleteBroadcastNotice = deleteBroadcastNotice;
+window.renderBroadcastNoticesList = renderBroadcastNoticesList;
+window.renderEmployeeBroadcastRail = renderEmployeeBroadcastRail;
+window.dismissBroadcastNotice = dismissBroadcastNotice;
 
 function seedEmployeeFinanceNotificationsIfNeeded(emp) {
   if (!emp) return;
@@ -8176,18 +10606,125 @@ function buildReportCharts() {
 // ======= EMPLOYEE PORTAL DYNAMIC =======
 function getLoggedInEmp() {
   if (!window.loggedInEmpId) return null;
-  return employees.find(e => e.id === window.loggedInEmpId) || null;
+  var empId = parseInt(window.loggedInEmpId, 10);
+  var emp = (employees || []).find(function (e) { return e && e.id === empId; });
+  if (emp) return emp;
+  return null;
+}
+
+function showEmpPortalStatusBanner(message, tone) {
+  var homePage = document.getElementById('page-emp-home');
+  if (!homePage || currentUser !== 'emp') return;
+  var bannerId = 'emp-portal-status-banner';
+  var existing = document.getElementById(bannerId);
+  if (!message) {
+    if (existing) existing.remove();
+    window.__basmaEmpPortalBannerMsg = '';
+    return;
+  }
+  if (existing && existing.textContent === message && window.__basmaEmpPortalBannerMsg === message) return;
+  window.__basmaEmpPortalBannerMsg = message;
+  var palette = {
+    info: { bg: 'rgba(99,179,237,0.12)', border: 'rgba(99,179,237,0.35)', color: '#63b3ed' },
+    warn: { bg: 'rgba(252,211,77,0.12)', border: 'rgba(252,211,77,0.35)', color: '#f6e05e' },
+    error: { bg: 'rgba(252,129,129,0.12)', border: 'rgba(252,129,129,0.35)', color: '#fc8181' },
+    success: { bg: 'rgba(104,211,145,0.12)', border: 'rgba(104,211,145,0.35)', color: '#68d391' }
+  };
+  var p = palette[tone] || palette.info;
+  if (!existing) {
+    existing = document.createElement('div');
+    existing.id = bannerId;
+    homePage.insertBefore(existing, homePage.firstChild);
+  }
+  existing.style.cssText = 'margin:12px 16px;padding:14px 16px;border-radius:12px;background:' + p.bg + ';border:1px solid ' + p.border + ';color:' + p.color + ';font-weight:700;text-align:center;line-height:1.7';
+  existing.textContent = message;
+}
+
+async function ensureLoggedInEmployeeLoaded() {
+  var empId = parseInt(window.loggedInEmpId, 10);
+  if (!empId) return null;
+  var emp = getLoggedInEmp();
+  if (emp) return emp;
+  var cached = typeof getCachedEmployeeSessionIds === 'function'
+    ? getCachedEmployeeSessionIds()
+    : { empId: empId, slot: 1, companyId: 0 };
+  var fp = typeof getDeviceFingerprint === 'function' ? getDeviceFingerprint() : '';
+  if (typeof sb_verifyEmployeeDeviceAccess === 'function') {
+    try {
+      var access = await withClientTimeout(
+        sb_verifyEmployeeDeviceAccess(empId, { fingerprint: fp, slot: cached.slot }),
+        12000,
+        'employee_verify'
+      );
+      if (access && access.ok === true && typeof ensureEmployeeFromServerAccess === 'function') {
+        emp = await ensureEmployeeFromServerAccess(empId, cached.slot, fp, access);
+        if (emp) {
+          upsertEmployeeIntoStore(emp);
+          return emp;
+        }
+      }
+      if (access && access.error === 'device_not_authorized') return null;
+      if (access && access.error === 'employee_not_found') return null;
+    } catch (e) {
+      console.warn('ensureLoggedInEmployeeLoaded verify:', e);
+    }
+  }
+  if (typeof resolveRegisteredEmployeeFromServer === 'function') {
+    try {
+      emp = await withClientTimeout(
+        resolveRegisteredEmployeeFromServer(fp, appSettings.ipRestrict !== false),
+        14000,
+        'employee_resolve'
+      );
+      if (emp) {
+        upsertEmployeeIntoStore(emp);
+        window.loggedInEmpId = emp.id;
+        return emp;
+      }
+    } catch (e) {
+      console.warn('ensureLoggedInEmployeeLoaded resolve:', e);
+    }
+  }
+  if (typeof refreshEmployeeClientProfileById === 'function') {
+    try {
+      emp = await withClientTimeout(
+        refreshEmployeeClientProfileById(empId, { fingerprint: fp, slot: cached.slot }),
+        12000,
+        'employee_profile'
+      );
+      if (emp) {
+        upsertEmployeeIntoStore(emp);
+        return emp;
+      }
+    } catch (e) {
+      console.warn('ensureLoggedInEmployeeLoaded profile:', e);
+    }
+  }
+  return null;
+}
+
+function displayEmpLoginNotice() {
+  var notice = window.__basmaEmpLoginNotice;
+  if (!notice) return;
+  var st = document.getElementById('emp-login-status');
+  if (!st) return;
+  st.innerHTML = '<span style="color:#fc8181;font-weight:700">' + esc(notice.title || 'تنبيه') + '</span><br>' +
+    '<span style="font-size:12px;color:var(--text-muted)">' + esc(notice.text || '') + '</span>';
+  window.__basmaEmpLoginNotice = null;
 }
 
 var _deletedEmpVerifyInFlight = false;
+var _deletedEmpVerifyCooldownUntil = 0;
+var _empPortalLoadInFlight = false;
+var _empNotifsLoadedAt = 0;
 
 async function verifyLoggedInEmployeeAccountStatus() {
   if (currentUser !== 'emp' || !window.loggedInEmpId) return 'active';
   var empId = parseInt(window.loggedInEmpId, 10);
   if (!empId) return 'active';
   if ((employees || []).some(function (e) { return e && e.id === empId; })) return 'active';
-  if (typeof sb_fetchEmployeeClientProfile !== 'function') return 'deleted';
-  var cachedSlot = parseInt(localStorage.getItem('basma_registered_slot') || '1', 10) || 1;
+  if (typeof sb_fetchEmployeeClientProfile !== 'function') return 'pending';
+  var cachedSlot = window.__basmaEmpSession ? (parseInt(window.__basmaEmpSession.slot || '1', 10) || 1) : 1;
   var fp = typeof getDeviceFingerprintForRpc === 'function' ? getDeviceFingerprintForRpc()
     : (typeof getDeviceFingerprint === 'function' ? getDeviceFingerprint() : '');
   var token = null;
@@ -8205,60 +10742,145 @@ async function verifyLoggedInEmployeeAccountStatus() {
       if (typeof clearEmployeeDeletedLocally === 'function') clearEmployeeDeletedLocally(empId);
       return 'active';
     }
-    if (prof && prof.error === 'device_not_authorized') return 'relink';
+    if (prof && prof.error === 'device_not_authorized' && (token || fp)) return 'relink';
     if (prof && prof.error === 'employee_not_found') return 'deleted';
+    if (!prof) return 'pending';
   } catch (e) {
     console.warn('verifyLoggedInEmployeeAccountStatus:', e);
+    return 'pending';
   }
-  return 'deleted';
+  return 'pending';
 }
 
 function forceEmployeePortalLogout(messageTitle, messageText) {
+  window.__basmaLoggingOut = true;
+  window.__basmaEmpLoginNotice = { title: messageTitle, text: messageText };
   clearRegisteredDeviceCache();
   window.loggedInEmpId = null;
   currentUser = null;
   checkedIn = false;
   checkInTime = null;
-  var app = document.getElementById('app');
-  var login = document.getElementById('login-page');
-  if (app) app.style.display = 'none';
-  if (login) login.style.display = 'flex';
-  Swal.fire({ icon: 'info', title: messageTitle, text: messageText, ...swalTheme() });
+  if (typeof stopEmployeePortalPolling === 'function') stopEmployeePortalPolling();
+  showEmpPortalStatusBanner(null);
+  showLoginPageAfterLogout();
+  window.__basmaPreserveSwal = true;
+  setTimeout(function () {
+    window.__basmaPreserveSwal = false;
+    if (typeof displayEmpLoginNotice === 'function') displayEmpLoginNotice();
+    if (typeof switchLoginTab === 'function') {
+      var empTab = document.querySelector('.login-tab[data-type="emp"]') ||
+        Array.prototype.find.call(document.querySelectorAll('.login-tab') || [], function (t) {
+          return t && t.textContent && t.textContent.indexOf('موظف') >= 0;
+        });
+      switchLoginTab('emp', empTab || null);
+    } else if (typeof refreshEmpLoginIp === 'function') {
+      refreshEmpLoginIp();
+    }
+    Swal.fire({
+      icon: 'info',
+      title: messageTitle,
+      html: '<div style="font-size:14px;line-height:1.8">' + esc(messageText || '') + '</div>',
+      confirmButtonText: 'حسناً',
+      ...swalTheme()
+    });
+  }, 420);
+}
+
+// المرحلة 3 — حالة حساب الموظف (نشط/موقوف)
+var SUSPENDED_MSG = 'تم إيقاف حسابك، يرجى مراجعة الإدارة.';
+
+function isLoggedInEmployeeSuspended() {
+  if (currentUser !== 'emp') return false;
+  var emp = getLoggedInEmp();
+  return !!(emp && emp.active === false);
+}
+
+// حارس موثوق من الخادم قبل أي إجراء حضور — يُخرج الموظف الموقوف فوراً.
+// عند تعذّر الاتصال يرجع للحالة المحلية (لا يمنع الموظف النشط بلا داعٍ).
+async function guardEmployeeAccountActive() {
+  if (currentUser !== 'emp' || !window.loggedInEmpId) return true;
+  if (typeof sb_employeeLoginGate === 'function') {
+    try {
+      var gate = await sb_employeeLoginGate(window.loggedInEmpId);
+      if (gate && gate.active === false) {
+        var emp = getLoggedInEmp();
+        if (emp) emp.active = false;
+        forceEmployeePortalLogout('تم إيقاف الحساب', (gate.message || SUSPENDED_MSG));
+        return false;
+      }
+      if (gate && gate.active === true) {
+        var e2 = getLoggedInEmp();
+        if (e2) e2.active = true;
+        return true;
+      }
+    } catch (e) {
+      console.warn('guardEmployeeAccountActive:', e);
+    }
+  }
+  if (isLoggedInEmployeeSuspended()) {
+    forceEmployeePortalLogout('تم إيقاف الحساب', SUSPENDED_MSG);
+    return false;
+  }
+  return true;
 }
 
 function handleDeletedLoggedEmployee() {
   if (currentUser !== 'emp' || !window.loggedInEmpId) return false;
   var empId = parseInt(window.loggedInEmpId, 10);
   if ((employees || []).some(function (e) { return e && e.id === empId; })) return false;
-  if (_deletedEmpVerifyInFlight) return true;
+  if (_deletedEmpVerifyInFlight) return false;
+  if (Date.now() < _deletedEmpVerifyCooldownUntil) return false;
+  _deletedEmpVerifyCooldownUntil = Date.now() + 15000;
   _deletedEmpVerifyInFlight = true;
+  showEmpPortalStatusBanner('جارٍ التحقق من حساب الموظف...', 'info');
   verifyLoggedInEmployeeAccountStatus().then(function (status) {
     _deletedEmpVerifyInFlight = false;
     if (status === 'active') {
+      showEmpPortalStatusBanner(null);
       if (typeof buildEmpPortal === 'function') buildEmpPortal();
       return;
+    }
+    if (status === 'pending') {
+      return ensureLoggedInEmployeeLoaded().then(function (emp) {
+        if (emp) {
+          showEmpPortalStatusBanner(null);
+          if (typeof buildEmpPortal === 'function') buildEmpPortal();
+          return;
+        }
+        showEmpPortalStatusBanner('تعذّر تحميل بيانات الموظف — تحقق من الإنترنت ثم حدّث الصفحة أو أعد مسح QR.', 'error');
+      });
     }
     if (status === 'relink') {
       forceEmployeePortalLogout(
         'يجب إعادة ربط الجهاز',
-        'تمت إعادة إنشاء حسابك من لوحة الإدارة. امسح رمز QR الجديد من قائمة الموظفين ثم سجّل الدخول من هذا الهاتف.'
+        'تم تغيير بيانات الجهاز من لوحة الإدارة. امسح رمز QR الجديد من قائمة الموظفين ثم سجّل الدخول من هذا الهاتف.'
       );
       return;
     }
     forceEmployeePortalLogout(
       'تم حذف حساب الموظف',
-      'تم حذف هذا الموظف من لوحة الإدارة، لذلك تم تسجيل الخروج من هذا الجهاز.'
+      'تم حذف هذا الموظف من لوحة الإدارة، لذلك لا يمكن تسجيل الحضور من هذا الجهاز.'
     );
   }).catch(function (e) {
     _deletedEmpVerifyInFlight = false;
     console.warn('handleDeletedLoggedEmployee:', e);
+    showEmpPortalStatusBanner('تعذّر الاتصال بالسحابة — تحقق من الإنترنت ثم حدّث الصفحة.', 'warn');
   });
-  return true;
+  return false;
+}
+
+function isEmpPortalOffline() {
+  if (typeof BasmaNetworkStatus !== 'undefined' && BasmaNetworkStatus.getState) {
+    var st = BasmaNetworkStatus.getState();
+    if (st && !st.checking && (st.quality === 'offline' || st.online === false)) return true;
+  }
+  return typeof BasmaCloud !== 'undefined' && BasmaCloud.isOnline && !BasmaCloud.isOnline();
 }
 
 function applyEmpPortalSubscriptionLock() {
   if (currentUser !== 'emp') return;
   var locked = typeof isEmployeePortalLocked === 'function' ? isEmployeePortalLocked() : (typeof isSubscriptionActive === 'function' && !isSubscriptionActive());
+  var offline = isEmpPortalOffline();
   var homePage = document.getElementById('page-emp-home');
   var bannerId = 'emp-subscription-lock-banner';
   var existing = document.getElementById(bannerId);
@@ -8266,17 +10888,28 @@ function applyEmpPortalSubscriptionLock() {
     if (!existing) {
       existing = document.createElement('div');
       existing.id = bannerId;
-      existing.style.cssText = 'margin:12px 16px;padding:14px 16px;border-radius:12px;background:rgba(252,129,129,0.12);border:1px solid rgba(252,129,129,0.35);color:#fc8181;font-weight:700;text-align:center';
-      existing.textContent = '⛔ انتهى اشتراك الشركة — لا يمكن تسجيل الحضور/الانصراف. تواصل مع الإدارة للتجديد.';
+      existing.style.cssText = 'margin:12px 16px;padding:14px 16px;border-radius:12px;background:rgba(252,129,129,0.12);border:1px solid rgba(252,129,129,0.35);color:#fc8181;font-weight:700;text-align:center;line-height:1.7';
       homePage.insertBefore(existing, homePage.firstChild);
     }
-  } else if (existing) {
-    existing.remove();
+    existing.textContent = '⛔ انتهى اشتراك الشركة — لا يمكن تسجيل الحضور/الانصراف. تواصل مع الإدارة للتجديد.';
+  } else if (offline) {
+    if (existing) existing.remove();
+    var netBanner = document.getElementById('emp-portal-status-banner');
+    if (netBanner && /اتصال|إنترنت|سحابة/i.test(netBanner.textContent || '')) {
+      showEmpPortalStatusBanner(null);
+    }
+  } else {
+    if (existing) existing.remove();
+    if (!document.getElementById('emp-portal-status-banner')) showEmpPortalStatusBanner(null);
   }
+  var blockAttendance = locked || offline;
   document.querySelectorAll('#page-emp-home .att-btn').forEach(function (btn) {
-    btn.disabled = !!locked;
-    btn.style.opacity = locked ? '0.45' : '';
-    btn.style.pointerEvents = locked ? 'none' : '';
+    btn.disabled = !!blockAttendance;
+    btn.style.opacity = blockAttendance ? '0.45' : '';
+    btn.style.pointerEvents = blockAttendance ? 'none' : '';
+    btn.title = locked
+      ? 'انتهى اشتراك الشركة — تواصل مع الإدارة'
+      : (offline ? 'لا يوجد اتصال بالإنترنت' : '');
   });
   if (locked) {
     var salNet = document.getElementById('emp-salary-net');
@@ -8288,23 +10921,66 @@ function applyEmpPortalSubscriptionLock() {
 
 function buildEmpPortal(options) {
   options = options || {};
-  const emp = getLoggedInEmp();
-  if (!emp) { handleDeletedLoggedEmployee(); return; }
+  var emp = getLoggedInEmp();
+  if (!emp && window.loggedInEmpId && currentUser === 'emp') {
+    if (_empPortalLoadInFlight) return;
+    _empPortalLoadInFlight = true;
+    showEmpPortalStatusBanner('جارٍ تحميل بيانات الموظف من السحابة...', 'info');
+    ensureLoggedInEmployeeLoaded().then(function (loaded) {
+      if (loaded) {
+        showEmpPortalStatusBanner(null);
+        buildEmpPortal(options);
+      } else {
+        showEmpPortalStatusBanner('تعذّر تحميل حسابك — تحقق من الإنترنت أو أعد مسح QR من لوحة الإدارة.', 'error');
+        handleDeletedLoggedEmployee();
+      }
+    }).catch(function (e) {
+      console.warn('buildEmpPortal load:', e);
+      showEmpPortalStatusBanner('تعذّر الاتصال بالسحابة — حاول تحديث الصفحة.', 'warn');
+    }).finally(function () {
+      _empPortalLoadInFlight = false;
+    });
+    return;
+  }
+  if (!emp) return;
   normalizeEmployee(emp);
+
+  if (currentUser === 'emp' && emp.active === false) {
+    forceEmployeePortalLogout('تم إيقاف الحساب', SUSPENDED_MSG);
+    return;
+  }
 
   if (!options.skipSubscriptionRefresh && currentUser === 'emp' && typeof refreshSubscriptionStatusForCurrentContext === 'function') {
     refreshSubscriptionStatusForCurrentContext()
       .catch(function (e) { console.warn('buildEmpPortal subscription refresh:', e); })
       .finally(function () {
         buildEmpPortalBody(emp);
+        if (currentUser === 'emp' && !window.__basmaPortalVisitLogged) {
+          window.__basmaPortalVisitLogged = true;
+          logEmployeePortalEvent('portal_visit', { empId: emp.id, success: true, meta: { page: 'emp-home' } });
+        }
       });
     return;
   }
   buildEmpPortalBody(emp);
+  if (currentUser === 'emp' && !window.__basmaPortalVisitLogged) {
+    window.__basmaPortalVisitLogged = true;
+    logEmployeePortalEvent('portal_visit', { empId: emp.id, success: true, meta: { page: 'emp-home' } });
+  }
 }
 
 function buildEmpPortalBody(emp) {
 
+  if (currentUser === 'emp' && typeof refreshOfficialClosuresFromCloud === 'function') {
+    refreshOfficialClosuresFromCloud().finally(function () {
+      buildEmpPortalBodyInner(emp);
+    });
+    return;
+  }
+  buildEmpPortalBodyInner(emp);
+}
+
+function buildEmpPortalBodyInner(emp) {
   if (typeof syncLeavesFromSupabase === 'function') {
     syncLeavesFromSupabase({ empId: emp.id }).then(function () {
       if (typeof buildEmployeeLeaves === 'function') buildEmployeeLeaves(emp.id);
@@ -8345,11 +11021,19 @@ function buildEmpPortalBody(emp) {
     var tags = [];
     if (emp.remoteAttend) tags.push('<span style="font-size:12px;padding:4px 10px;border-radius:999px;background:rgba(104,211,145,0.15);color:#68d391">📍 حضور من أي مكان</span>');
     if (emp.openHours) tags.push('<span style="font-size:12px;padding:4px 10px;border-radius:999px;background:rgba(99,179,237,0.15);color:#63b3ed">🕐 دوام وقت مفتوح</span>');
+    if (isOvernightShift(emp)) tags.push('<span style="font-size:12px;padding:4px 10px;border-radius:999px;background:rgba(237,137,54,0.15);color:#ed8936">🌙 دوام ليلي (' + esc(emp.checkIn || '22:00') + ' → ' + esc(emp.checkOut || '05:00') + ')</span>');
+    var activeClosure = officialClosureForDate();
+    if (activeClosure) {
+      tags.push('<span style="font-size:12px;padding:4px 10px;border-radius:999px;background:rgba(128,90,213,0.16);color:#d6bcfa">تعطيل رسمي: ' + esc(activeClosure.title) + '</span>');
+    }
     modeTags.innerHTML = tags.length ? tags.join('') : '<span style="font-size:12px;color:var(--text-muted)">الحضور يتطلب موقع الشركة — فعّل «أي مكان» من الإدارة إن لزم</span>';
   }
+  var closureForButtons = officialClosureForDate();
+  renderOfficialClosureEmpBanner(closureForButtons);
+  bindOfficialClosureAttendanceButtons(closureForButtons);
 
   // === DAILY STATUS ===
-  const todayRec = attData.find(r => r.empId === emp.id && isAttendanceRecordToday(r));
+  const portalRec = getEmpPortalAttendanceRecord(emp);
   const sCheckin = document.getElementById('s-checkin');
   const sCheckout = document.getElementById('s-checkout');
   const sHours = document.getElementById('s-hours');
@@ -8357,30 +11041,26 @@ function buildEmpPortalBody(emp) {
   const checkinTimeEl = document.getElementById('checkin-time');
   const checkoutTimeEl = document.getElementById('checkout-time');
 
-  if (todayRec) {
-    if (sCheckin) sCheckin.textContent = todayRec.ci !== '—' ? todayRec.ci : '--:-- --';
-    if (sCheckout) sCheckout.textContent = todayRec.co !== '—' ? todayRec.co : '--:-- --';
-    if (sHours) sHours.textContent = formatWorkHoursDisplay(todayRec, emp);
-    if (sLate) sLate.textContent = todayRec.late !== '—' ? todayRec.late + ' د' : '0 د';
-    if (checkinTimeEl) checkinTimeEl.textContent = todayRec.ci !== '—' ? todayRec.ci : 'اضغط للتسجيل';
-    if (checkoutTimeEl) checkoutTimeEl.textContent = todayRec.co !== '—' ? todayRec.co : 'اضغط للتسجيل';
-    checkedIn = todayRec.ci !== '—' && (!todayRec.co || todayRec.co === '—');
-    if (todayRec.ci !== '—') {
+  if (portalRec) {
+    if (sCheckin) sCheckin.textContent = portalRec.ci !== '—' ? portalRec.ci : '--:-- --';
+    if (sCheckout) sCheckout.textContent = portalRec.co !== '—' ? portalRec.co : '--:-- --';
+    if (sHours) sHours.textContent = formatWorkHoursDisplay(portalRec, emp);
+    if (sLate) sLate.textContent = portalRec.late !== '—' ? portalRec.late + ' د' : '0 د';
+    if (checkinTimeEl) checkinTimeEl.textContent = portalRec.ci !== '—' ? portalRec.ci : 'اسحب للتسجيل';
+    if (checkoutTimeEl) checkoutTimeEl.textContent = portalRec.co !== '—' ? portalRec.co : 'اسحب للتسجيل';
+    checkedIn = portalRec.ci !== '—' && (!portalRec.co || portalRec.co === '—');
+    if (portalRec.ci !== '—') {
       const now = new Date();
-      const h = now.getHours();
-      const m = now.getMinutes();
-      const ampm = h >= 12 ? 'PM' : 'AM';
-      const hh = ((h % 12) || 12).toString().padStart(2, '0');
-      const mm = m.toString().padStart(2, '0');
-      const timeStr = hh + ':' + mm + ' ' + ampm;
-      const parts = todayRec.ci.match(/(\d+):(\d+)\s*(AM|PM)/i);
+      const recIso = attendanceRecordIso(portalRec) || todayIsoDate();
+      const parts = portalRec.ci.match(/(\d+):(\d+)\s*(AM|PM)/i);
       if (parts) {
         let ch = parseInt(parts[1]);
         const cm = parseInt(parts[2]);
         const cap = parts[3].toUpperCase();
         if (cap === 'PM' && ch !== 12) ch += 12;
         if (cap === 'AM' && ch === 12) ch = 0;
-        checkInTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), ch, cm);
+        var recDateParts = recIso.split('-');
+        checkInTime = new Date(parseInt(recDateParts[0], 10), parseInt(recDateParts[1], 10) - 1, parseInt(recDateParts[2], 10), ch, cm);
       } else {
         checkInTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 8, 0);
       }
@@ -8399,7 +11079,9 @@ function buildEmpPortalBody(emp) {
   // === WEEK TABLE ===
   const weekTable = document.getElementById('emp-week-table');
   if (weekTable) {
-    const empAtts = attData.filter(r => r.empId === emp.id);
+    const empAtts = typeof getEmpPortalAttendanceRows === 'function'
+      ? getEmpPortalAttendanceRows(emp, { days: 60 })
+      : attData.filter(function (r) { return r.empId === emp.id && isPunchAttendanceRecord(r); });
     const statusMap = { 'طبيعي': 'badge-success', 'متأخر': 'badge-warning', 'غياب': 'badge-danger', 'إضافي': 'badge-info' };
     const statusIcon = { 'طبيعي': '🟢', 'متأخر': '🟡', 'غياب': '🔴', 'إضافي': '🔵' };
     if (empAtts.length === 0) {
@@ -8432,7 +11114,7 @@ function buildEmpPortalBody(emp) {
   const sal = calcEmpSalary(emp);
   const deduct = sal.totalDeduct;
   const financialDeduct = (sal.manualDeduct || 0) + (sal.loanDeduct || 0);
-  const ot = sal.ot;
+  const ot = sal.overtimeInNet ? (sal.ot || 0) : 0;
   let finalSalary = sal.final;
   let salaryDisplayLabel = 'صافي الراتب — ' + currentMonth;
   let baseDisplay = '0';
@@ -8466,7 +11148,10 @@ function buildEmpPortalBody(emp) {
   const salaryBreakdown = document.getElementById('emp-salary-breakdown');
 
   if (salaryLabel) salaryLabel.textContent = portalLocked ? 'الراتب غير متاح — اشتراك منتهٍ' : salaryDisplayLabel;
-  if (salaryNet) salaryNet.textContent = portalLocked ? '—' : (isCommission ? 'عمولة' : netDisplay);
+  if (salaryNet) {
+    salaryNet.textContent = portalLocked ? '—' : (isCommission ? 'عمولة' : netDisplay);
+    applySalaryNetElementStyle(salaryNet, finalSalary, isCommission);
+  }
   if (salaryBase) salaryBase.textContent = portalLocked ? '—' : baseDisplay;
   if (salaryOt) salaryOt.textContent = portalLocked ? '—' : (isCommission ? '—' : (ot > 0 ? ot.toLocaleString() : '0'));
   if (salaryOtSub) salaryOtSub.textContent = portalLocked ? 'غير متاح' : (isCommission ? 'لا يوجد' : (emp.openHours ? 'دوام مفتوح: لا إضافي تلقائي' : (ot > 0 ? ('إضافي ' + Math.floor((sal.totalOvertimeMin || 0) / 60) + 'س ' + ((sal.totalOvertimeMin || 0) % 60) + 'د — ' + (sal.overtimeInNet ? 'مضاف للصافي' : 'للتقارير فقط')) : 'لا يوجد إضافي')));
@@ -8496,7 +11181,7 @@ function buildEmpPortalBody(emp) {
     } else {
       var lines = [];
       lines.push('الراتب الأساسي: <b>' + sal.baseSalary.toLocaleString() + ' IQD</b>');
-      lines.push('الصافي الحالي: <b style="color:var(--accent)">' + sal.final.toLocaleString() + ' IQD</b>');
+      lines.push('الصافي الحالي: ' + salaryNetInlineHtml(sal.final, false));
       if (sal.manualDeduct > 0) lines.push('خصومات مالية: <b style="color:#fc8181">' + sal.manualDeduct.toLocaleString() + ' IQD</b>');
       if (sal.loanDeduct > 0) lines.push('سلف/دفعات: <b style="color:#f6ad55">' + sal.loanDeduct.toLocaleString() + ' IQD</b>');
       if (sal.leaveDeduct > 0) lines.push('خصم إجازات: <b style="color:#f6ad55">' + sal.leaveDeduct.toLocaleString() + ' IQD</b> (' + (sal.leaveDays || 0) + ' يوم)');
@@ -8594,8 +11279,22 @@ function buildEmpPortalBody(emp) {
   // === EMPLOYEE LEAVES & NOTIFICATIONS ===
   if (typeof buildEmployeeLeaves === 'function') buildEmployeeLeaves(emp.id);
   if (!portalLocked && typeof buildEmployeeLeaveNotifs === 'function') buildEmployeeLeaveNotifs(emp.id);
-  if (!portalLocked && typeof loadEmpNotifsFromSupabase === 'function') loadEmpNotifsFromSupabase(emp.id).catch(function(){});
+  if (!portalLocked) {
+    var notifRefreshNow = Date.now();
+    if (notifRefreshNow - _empNotifsLoadedAt >= 25000) {
+      _empNotifsLoadedAt = notifRefreshNow;
+      if (typeof loadEmpNotifsFromSupabase === 'function') {
+        loadEmpNotifsFromSupabase(emp.id).catch(function () {});
+      }
+    }
+  }
   applyEmpPortalSubscriptionLock();
+  if (typeof BasmaNetworkStatus !== 'undefined') {
+    if (BasmaNetworkStatus.applyUi) BasmaNetworkStatus.applyUi();
+    if (BasmaNetworkStatus.probe) BasmaNetworkStatus.probe(true);
+  }
+  if (!portalLocked && typeof renderEmployeeFinanceNotificationsRail === 'function') renderEmployeeFinanceNotificationsRail();
+  if (!portalLocked && typeof renderEmployeeBroadcastRail === 'function') renderEmployeeBroadcastRail();
 }
 
 function changeEmpAvatar() {
@@ -8752,8 +11451,8 @@ function openEmpAvatarCropper(file, emp) {
       if (typeof buildEmployees === 'function') buildEmployees();
       Swal.fire({
         icon: synced ? 'success' : 'warning',
-        title: synced ? 'تم حفظ الصورة' : 'تم الحفظ محلياً',
-        text: synced ? 'تمت مزامنة الصورة مع لوحة المسؤول' : 'تعذّر رفع الصورة للسيرفر — ستظهر محلياً فقط',
+        title: synced ? 'تم حفظ الصورة' : 'لم يتم حفظ الصورة',
+        text: synced ? 'تمت مزامنة الصورة مع لوحة المسؤول' : 'تعذّر رفع الصورة للسحابة — تحقق من الإنترنت ثم حاول مرة أخرى',
         ...swalTheme(),
         timer: synced ? 1800 : undefined,
         showConfirmButton: !synced
@@ -8940,10 +11639,12 @@ function saveEmpProfile() {
 
 // ======= CHECK IN/OUT =======
 // Helper: calculate and save attendance record
-async function doCheckIn(emp, locationLabel) {
+async function doCheckIn(emp, locationLabel, geo) {
   checkedIn = true;
 
   let rec = findOpenAttendanceRecord(emp.id);
+  var recExisted = !!rec;
+  var recBefore = rec ? JSON.parse(JSON.stringify(rec)) : null;
   if (!rec) {
     rec = { empId: emp.id, emp: fullEmpName(emp.name), dept: emp.dept, date: '', dateIso: '', ci: '—', co: '—', hrs: '—', late: '—', ot: '—', status: 'طبيعي' };
     attData.push(rec);
@@ -8952,18 +11653,45 @@ async function doCheckIn(emp, locationLabel) {
   rec._punchType = 'check_in';
   applyOptimisticPunchToRecord(rec, 'check_in');
   checkInTime = rec.ci;
-  saveData();
-  buildEmpPortal({ skipSubscriptionRefresh: true });
-  if (typeof buildAttendance === 'function') buildAttendance();
-  buildDashboard();
+  if (currentUser !== 'emp') {
+    saveData();
+    buildEmpPortal({ skipSubscriptionRefresh: true });
+    if (typeof buildAttendance === 'function') buildAttendance();
+    buildDashboard();
+  }
 
   var saved = await persistAttendanceNow(rec);
-  if (saved && saved.ok === false) {
+  if (!saved || saved.ok === false) {
     checkedIn = false;
-    var blockMsg = saved.error === 'subscription_inactive'
-      ? 'حساب الشركة موقوف — لا يمكن تسجيل الحضور.'
-      : (saved.error === 'rate_limited' ? 'تم تجاوز عدد المحاولات، حاول لاحقاً.'
-        : (saved.error === 'device_not_authorized' ? 'الجهاز غير مصرح.' : 'تعذّر تسجيل الحضور.'));
+    if (currentUser === 'emp') {
+      var idx = attData.indexOf(rec);
+      if (recExisted && idx >= 0 && recBefore) {
+        Object.keys(rec).forEach(function (k) { delete rec[k]; });
+        Object.assign(rec, recBefore);
+      } else if (idx >= 0) {
+        attData.splice(idx, 1);
+      }
+      checkInTime = null;
+      delete rec._pendingRemoteSync;
+      saveData();
+      buildEmpPortal({ skipSubscriptionRefresh: true });
+      if (typeof buildAttendance === 'function') buildAttendance();
+      buildDashboard();
+    }
+    var errCode = saved && saved.error ? saved.error : 'cloud_unavailable';
+    var errDetail = saved && saved.detail ? saved.detail : '';
+    if (isOfficialClosureErrorCode(errCode, errDetail)) {
+      var closureHit = officialClosureForDate(rec.dateIso) || officialClosureForDate();
+      if (closureHit) {
+        showOfficialClosureBlock(closureHit, 'تسجيل الحضور');
+        return;
+      }
+    }
+    if (errCode === 'employee_suspended') {
+      forceEmployeePortalLogout('تم إيقاف الحساب', (saved && saved.message) || SUSPENDED_MSG);
+      return;
+    }
+    var blockMsg = mapAttendanceSaveErrorMessage(errCode, errDetail, 'checkin');
     Swal.fire({ icon: 'error', title: 'فشل تسجيل الحضور', text: blockMsg, ...swalTheme() });
     return;
   }
@@ -8972,7 +11700,7 @@ async function doCheckIn(emp, locationLabel) {
   var t = (rec.ci && rec.ci !== '—') ? rec.ci : (saved && saved.check_in && saved.check_in !== '—' ? saved.check_in : '—');
   var lateMin = 0;
   if (rec.late && rec.late !== '—') {
-    lateMin = parseInt(String(rec.late).replace(/[^\d]/g, ''), 10) || 0;
+    lateMin = parseDurationMinutes(rec.late) || 0;
   }
   var isLate = rec.status === 'متأخر';
 
@@ -8984,6 +11712,17 @@ async function doCheckIn(emp, locationLabel) {
   saveData();
   await persistEmployeeNow(emp);
   logActivity('checkin', 'attendance', 'تسجيل حضور: ' + emp.name + ' — ' + t, { targetName: emp.name, empId: emp.id, targetEmpId: emp.id });
+  await logEmployeePortalEvent('check_in', {
+    empId: emp.id,
+    success: true,
+    geo: geo || null,
+    meta: {
+      time: t,
+      location: locationLabel || '',
+      remote_attend: !!(emp && emp.remoteAttend),
+      address: geo && geo._trackAddress ? geo._trackAddress : undefined
+    }
+  });
   buildEmpPortal({ skipSubscriptionRefresh: true });
   if (typeof buildAttendance === 'function') buildAttendance();
   buildDashboard();
@@ -8994,7 +11733,7 @@ async function doCheckIn(emp, locationLabel) {
   }
 
   const lateInfo = emp.openHours
-    ? '<br>🕐 دوام وقت مفتوح — يوم كامل'
+    ? '<br>🕐 دوام وقت مفتوح — لا يُحتسب اليوم في الراتب حتى تسجيل الانصراف'
     : (lateMin > 0 ? '<br>⏱ تأخير: ' + lateMin + ' دقيقة' + (isLate ? ' (متأخر)' : '') : '');
   Swal.fire({ icon:'success', title:'✅ تم تسجيل الحضور', html:'الوقت: <b>' + t + '</b><br>' + locationLabel + lateInfo, ...swalTheme() });
 }
@@ -9008,6 +11747,173 @@ function distanceMeters(lat1, lng1, lat2, lng2) {
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
     Math.sin(dLng/2) * Math.sin(dLng/2);
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function checkCompanyLocationFromGeo(geo) {
+  var cLat = Number(appSettings.gpsLat);
+  var cLng = Number(appSettings.gpsLng);
+  var range = Number(appSettings.gpsRange || 100);
+  if (!geo || !isValidCoord(cLat, cLng)) {
+    return { ok: false, distance: 0, range: range, effectiveRange: range, accuracy: 0, lat: geo ? geo.lat : null, lng: geo ? geo.lng : null };
+  }
+  var dist = Math.round(distanceMeters(geo.lat, geo.lng, cLat, cLng));
+  var accuracy = Math.round(geo.accuracy || 0);
+  var effectiveRange = range + Math.min(Math.max(accuracy, 0), 400);
+  return {
+    ok: dist <= effectiveRange,
+    distance: dist,
+    range: range,
+    effectiveRange: effectiveRange,
+    accuracy: accuracy,
+    lat: geo.lat,
+    lng: geo.lng
+  };
+}
+
+async function getGeolocationPermissionState() {
+  if (!navigator.permissions || typeof navigator.permissions.query !== 'function') return 'unknown';
+  try {
+    var res = await navigator.permissions.query({ name: 'geolocation' });
+    return res && res.state ? res.state : 'unknown';
+  } catch (e) {
+    return 'unknown';
+  }
+}
+
+function geolocationErrorHint(code) {
+  if (code === 1) {
+    return 'المتصفح لم يسمح بالموقع. افتح إعدادات المتصفح ← أذونات الموقع ← اسمح لـ kyno-hr.netlify.app';
+  }
+  if (code === 2) {
+    return 'تعذّر قراءة الإحداثيات. تأكد أن GPS مفعّل وجرّب قرب النافذة أو في الهواء الطلق.';
+  }
+  if (code === 3) {
+    return 'انتهت مهلة تحديد الموقع. حاول مرة أخرى مع GPS مفعّل.';
+  }
+  return 'تعذّر قراءة الموقع. فعّل GPS واسمح للمتصفح بالوصول للموقع.';
+}
+
+function readGeoPositionOnce(geoOptions) {
+  return new Promise(function (resolve) {
+    if (!navigator.geolocation) {
+      resolve({ geo: null, errorCode: 0, errorMessage: 'unsupported' });
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      function (pos) {
+        resolve({
+          geo: {
+            lat: pos.coords.latitude,
+            lng: pos.coords.longitude,
+            accuracy: pos.coords.accuracy
+          },
+          errorCode: 0
+        });
+      },
+      function (err) {
+        resolve({
+          geo: null,
+          errorCode: err && err.code ? err.code : 0,
+          errorMessage: err && err.message ? err.message : 'failed'
+        });
+      },
+      geoOptions || { enableHighAccuracy: false, timeout: 12000, maximumAge: 180000 }
+    );
+  });
+}
+
+async function collectPunchGeoReliable(options) {
+  options = options || {};
+  if (!navigator.geolocation) {
+    return { geo: null, source: 'unsupported' };
+  }
+  var strategies = [
+    { enableHighAccuracy: false, timeout: 8000, maximumAge: 300000 },
+    { enableHighAccuracy: false, timeout: 12000, maximumAge: 60000 },
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 15000 },
+    { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }
+  ];
+  var lastErr = null;
+  for (var i = 0; i < strategies.length; i++) {
+    var hit = await readGeoPositionOnce(strategies[i]);
+    if (hit && hit.geo) {
+      return { geo: hit.geo, source: 'read_' + i };
+    }
+    lastErr = hit;
+  }
+  return {
+    geo: null,
+    source: 'failed',
+    errorCode: lastErr && lastErr.errorCode,
+    errorMessage: lastErr && lastErr.errorMessage
+  };
+}
+
+async function requireMandatoryPunchGeo(options) {
+  options = options || {};
+  var purpose = options.purpose || 'check_in';
+  var actionLabel = purpose === 'check_out' ? 'الانصراف' : 'الحضور';
+
+  if (!navigator.geolocation) {
+    await Swal.fire({
+      icon: 'error',
+      title: 'الموقع غير مدعوم',
+      text: 'متصفحك لا يدعم تحديد الموقع. استخدم Chrome أو Safari على HTTPS.',
+      ...swalTheme()
+    });
+    return null;
+  }
+
+  async function finalizePack(pack) {
+    if (!pack || !pack.geo) return null;
+    pack.address = await reverseGeocodeClient(pack.geo.lat, pack.geo.lng);
+    return pack;
+  }
+
+  var firstTry = await finalizePack(await collectPunchGeoReliable({ timeoutMs: 15000, samples: 1 }));
+  if (firstTry && firstTry.geo) return firstTry;
+
+  var permState = await getGeolocationPermissionState();
+  if (permState === 'denied') {
+    await Swal.fire({
+      icon: 'error',
+      title: 'الموقع محظور من المتصفح',
+      html: 'GPS مفعّل على الهاتف، لكن <b>المتصفح</b> لم يسمح للموقع.<br><br>'
+        + '1. افتح إعدادات Chrome/Safari<br>'
+        + '2. أذونات الموقع ← <b>kyno-hr.netlify.app</b><br>'
+        + '3. اختر «السماح» ثم أعد المحاولة',
+      confirmButtonText: 'حاول مجدداً',
+      ...swalTheme()
+    });
+    var afterDenied = await finalizePack(await collectPunchGeoReliable({ timeoutMs: 15000, samples: 1 }));
+    if (afterDenied && afterDenied.geo) return afterDenied;
+    return null;
+  }
+
+  while (true) {
+    var ask = await Swal.fire({
+      icon: 'warning',
+      title: 'تفعيل الموقع مطلوب',
+      text: 'لا يمكن تسجيل ' + actionLabel + ' بدون السماح للمتصفح بالوصول للموقع (ليس فقط GPS الهاتف).',
+      showCancelButton: true,
+      confirmButtonText: 'تفعيل الموقع',
+      cancelButtonText: 'إلغاء',
+      confirmButtonColor: '#00d4aa',
+      ...swalTheme(),
+      preConfirm: function () {
+        return collectPunchGeoReliable({ timeoutMs: 18000, samples: 1 }).then(function (pack) {
+          if (pack && pack.geo) return pack;
+          var hint = geolocationErrorHint(pack && pack.errorCode);
+          Swal.showValidationMessage(hint);
+          return false;
+        });
+      }
+    });
+    if (!ask.isConfirmed) return null;
+    if (ask.value && ask.value.geo) {
+      return finalizePack(ask.value);
+    }
+  }
 }
 
 function verifyCompanyLocation(options) {
@@ -9035,6 +11941,13 @@ function verifyCompanyLocation(options) {
       if (watchId != null) navigator.geolocation.clearWatch(watchId);
       if (!samples.length) {
         reject(new Error('تعذر قراءة موقعك'));
+        return;
+      }
+      // نفضّل أي عينة ناجحة داخل النطاق لتقليل الرفض الخاطئ بسبب تذبذب GPS.
+      var okSamples = samples.filter(function (s) { return s && s.ok === true; });
+      if (okSamples.length) {
+        okSamples.sort(function (a, b) { return a.distance - b.distance; });
+        resolve(okSamples[0]);
         return;
       }
       samples.sort(function (a, b) { return a.distance - b.distance; });
@@ -9070,82 +11983,218 @@ function verifyCompanyLocation(options) {
   });
 }
 
-async function checkIn() {
-  let emp = getLoggedInEmp();
-  if (!emp) return;
-  var todayRec = attData.find(function (r) { return r.empId === emp.id && isAttendanceRecordToday(r); });
-  if (checkedIn || (todayRec && todayRec.ci && todayRec.ci !== '—')) {
-    Swal.fire({ icon:'warning', title:'تم التسجيل مسبقاً', text:'لقد سجلت حضورك بالفعل اليوم!', ...swalTheme() });
-    return;
-  }
-  if (!requireSubscription('تسجيل الحضور')) return;
-  if (typeof refreshLoggedInEmployeeFromServer === 'function') {
-    emp = await refreshLoggedInEmployeeFromServer() || emp;
-  }
+var _checkInInFlight = false;
+var _checkOutInFlight = false;
 
-  // Remote attend skips company GPS. Open hours only changes time accounting, not location policy.
-  if (emp.remoteAttend) {
-    await doCheckIn(emp, emp.openHours ? '📍 حضور عن بُعد — دوام وقت مفتوح' : '📍 حضور عن بُعد');
-    return;
-  }
+function isDeviceTrackingEnabled() {
+  return appSettings && appSettings.trackDevices !== false;
+}
 
-  Swal.fire({
-    title:'📍 جارٍ التحقق من الموقع...',
-    text:'يتم التحقق من موقعك الجغرافي قرب موقع الشركة', allowOutsideClick:false, showConfirmButton:false,
-    ...swalTheme(), didOpen:()=>Swal.showLoading()
-  });
-  verifyCompanyLocation().then(loc => {
-    if (!loc.ok) {
-      Swal.fire({
-        icon:'error',
-        title:'خارج نطاق الشركة',
-        html:'المسافة الحالية: <b>' + loc.distance + ' متر</b><br>نطاق السماح: <b>' + loc.range + ' متر</b>' + (loc.effectiveRange > loc.range ? ' (فعلي: ' + loc.effectiveRange + ' م)' : '') + '<br>دقة الهاتف: <b>' + loc.accuracy + ' متر</b><br><span style="font-size:12px;color:var(--text-muted)">تأكد أن المسؤول ضبط موقع الشركة في الإعدادات. إذا كنت داخل الشركة وما زال الخطأ يظهر، حرّك الهاتف قرب النافذة أو ارفع نطاق السماح قليلاً.</span>',
-        ...swalTheme()
-      });
+function collectPortalGeoMeta() {
+  return new Promise(function (resolve) {
+    if (!navigator.geolocation) {
+      resolve(null);
       return;
     }
-    return doCheckIn(emp, '📍 داخل موقع الشركة (' + loc.distance + 'م، دقة ' + loc.accuracy + 'م)');
-  }).catch(err => {
-    Swal.fire({ icon:'error', title:'تعذر التحقق من الموقع', text: err.message || String(err), ...swalTheme() });
+    var done = false;
+    var timer = setTimeout(function () {
+      if (done) return;
+      done = true;
+      resolve(null);
+    }, 3500);
+    navigator.geolocation.getCurrentPosition(function (pos) {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve({
+        lat: pos.coords.latitude,
+        lng: pos.coords.longitude,
+        accuracy: pos.coords.accuracy
+      });
+    }, function () {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(null);
+    }, { enableHighAccuracy: false, timeout: 3000, maximumAge: 60000 });
   });
 }
 
-async function checkOut() {
-  let emp = getLoggedInEmp();
-  if (!emp) return;
-  var todayRec = attData.find(function (r) { return r.empId === emp.id && isAttendanceRecordToday(r); });
-  if (todayRec && todayRec.co && todayRec.co !== '—') {
-    Swal.fire({ icon:'warning', title:'تم التسجيل مسبقاً', text:'لقد سجلت انصرافك بالفعل اليوم!', ...swalTheme() });
-    return;
-  }
-  if (!checkedIn && !(todayRec && todayRec.ci && todayRec.ci !== '—')) {
-    Swal.fire({ icon:'warning', title:'لم تسجل حضورك بعد', text:'يجب تسجيل الحضور أولاً', ...swalTheme() });
-    return;
-  }
-  if (!requireSubscription('تسجيل الانصراف')) return;
-  if (typeof refreshLoggedInEmployeeFromServer === 'function') {
-    emp = await refreshLoggedInEmployeeFromServer() || emp;
-  }
+function collectRemotePunchGeo(options) {
+  return collectPunchGeoReliable(options);
+}
 
-  let rec = todayRec || findOpenAttendanceRecord(emp.id);
-  if (!rec) {
-    rec = { empId: emp.id, emp: fullEmpName(emp.name), dept: emp.dept, date: '', dateIso: '', ci: '—', co: '—', hrs: '—', late: '—', ot: '—', status: 'طبيعي' };
-    attData.push(rec);
+async function reverseGeocodeClient(lat, lng) {
+  if (lat == null || lng == null) return null;
+  try {
+    var url = 'https://api.bigdatacloud.net/data/reverse-geocode-client?latitude='
+      + encodeURIComponent(lat) + '&longitude=' + encodeURIComponent(lng) + '&localityLanguage=ar';
+    var res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) return null;
+    var data = await res.json();
+    if (!data) return null;
+    var parts = [];
+    if (data.locality) parts.push(data.locality);
+    else if (data.city) parts.push(data.city);
+    if (data.principalSubdivision) parts.push(data.principalSubdivision);
+    if (data.countryName && parts.indexOf(data.countryName) < 0) parts.push(data.countryName);
+    return parts.length ? parts.join('، ') : (data.localityInfo && data.localityInfo.informative ? data.localityInfo.informative[0].name : null);
+  } catch (e) {
+    console.warn('reverseGeocodeClient:', e);
+    return null;
   }
+}
 
-  ensureAttendanceRecordDates(rec);
+async function resolveRemotePunchGeo() {
+  var pack = await collectPunchGeoReliable({ timeoutMs: 22000, samples: 6 });
+  if (pack && pack.geo) {
+    pack.address = await reverseGeocodeClient(pack.geo.lat, pack.geo.lng);
+  }
+  return pack || { geo: null, source: 'empty' };
+}
+
+async function ensureEmployeeRemoteAttendFresh(emp) {
+  if (!emp || !emp.id) return emp;
+  if (typeof sb_fetchEmployeeClientProfile !== 'function') return emp;
+  try {
+    var profile = await sb_fetchEmployeeClientProfile(emp.id);
+    if (profile && profile.ok === true) {
+      if (profile.remote_attend != null) emp.remoteAttend = profile.remote_attend === true;
+      if (profile.open_hours != null) emp.openHours = profile.open_hours === true;
+    }
+  } catch (e) {
+    console.warn('ensureEmployeeRemoteAttendFresh:', e);
+  }
+  return emp;
+}
+
+function buildRemotePunchLocationLabel(emp, punchKind, geoPack) {
+  var isCheckout = punchKind === 'check_out';
+  var action = isCheckout ? 'انصراف' : 'حضور';
+  var openHoursNote = emp && emp.openHours ? ' — دوام وقت مفتوح' : '';
+  if (geoPack && geoPack.geo) {
+    var g = geoPack.geo;
+    var acc = g.accuracy != null ? Math.round(g.accuracy) : null;
+    var coord = Number(g.lat).toFixed(5) + ', ' + Number(g.lng).toFixed(5) + (acc != null ? ' (±' + acc + 'م)' : '');
+    if (geoPack.address) {
+      return '📍 ' + action + ' عن بُعد' + openHoursNote + ' — ' + geoPack.address + ' — ' + coord;
+    }
+    return '📍 ' + action + ' عن بُعد' + openHoursNote + ' — الموقع: ' + coord;
+  }
+  return '📍 ' + action + ' عن بُعد' + openHoursNote + ' — الموقع غير متاح (اسمح بالموقع في المتصفح)';
+}
+
+async function logEmployeePortalEvent(eventType, options) {
+  if (!isDeviceTrackingEnabled()) return;
+  if (typeof sb_logEmployeePortalEvent !== 'function') return;
+  options = options || {};
+  var empId = parseInt(options.empId || window.loggedInEmpId || '0', 10);
+  if (!empId) return;
+  var geo = options.geo || null;
+  if (!geo && (eventType === 'check_in' || eventType === 'check_out')) {
+    var pack = await collectPunchGeoReliable({ timeoutMs: 12000, samples: 4 });
+    geo = pack && pack.geo ? pack.geo : null;
+    if (geo && options.meta && !options.meta.address) {
+      var addr = await reverseGeocodeClient(geo.lat, geo.lng);
+      if (addr) {
+        options.meta = Object.assign({}, options.meta, { address: addr });
+        if (!options.meta.location || options.meta.location.indexOf('غير متاح') >= 0) {
+          options.meta.location = addr + ' — ' + Number(geo.lat).toFixed(5) + ', ' + Number(geo.lng).toFixed(5);
+        }
+      }
+    }
+  }
+  try {
+    await sb_logEmployeePortalEvent(empId, eventType, {
+      success: options.success !== false,
+      ip: options.ip || currentClientIp || null,
+      userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : null,
+      geo: geo,
+      meta: options.meta || {}
+    });
+  } catch (e) {
+    console.warn('logEmployeePortalEvent:', e);
+  }
+}
+
+function setCheckOutButtonBusy(busy) {
+  try {
+    var btn = document.querySelector('#page-emp-home .att-btn.checkout');
+    if (!btn) return;
+    btn.disabled = !!busy;
+    btn.style.pointerEvents = busy ? 'none' : '';
+    btn.style.opacity = busy ? '0.65' : '';
+  } catch (e) { /* ignore */ }
+}
+
+function setCheckInButtonBusy(busy) {
+  try {
+    var btn = document.querySelector('#page-emp-home .att-btn.checkin');
+    if (!btn) return;
+    btn.disabled = !!busy;
+    btn.style.pointerEvents = busy ? 'none' : '';
+    btn.style.opacity = busy ? '0.65' : '';
+  } catch (e) { /* ignore */ }
+}
+
+async function settleAttendanceLoading(loadingShownAt, cb) {
+  var minMs = 700;
+  var elapsed = loadingShownAt ? (Date.now() - loadingShownAt) : minMs;
+  var remain = Math.max(0, minMs - elapsed);
+  if (remain > 0) await new Promise(function (r) { setTimeout(r, remain); });
+  return cb();
+}
+
+async function doCheckOut(emp, rec, recBefore, locationLabel, geo) {
+  if (!rec.dateIso && attendanceRecordIso(rec)) rec.dateIso = attendanceRecordIso(rec);
   rec._punchType = 'check_out';
   applyOptimisticPunchToRecord(rec, 'check_out');
-  saveData();
-  buildEmpPortal({ skipSubscriptionRefresh: true });
-  if (typeof buildAttendance === 'function') buildAttendance();
-  buildDashboard();
+  if (currentUser !== 'emp') {
+    saveData();
+    buildEmpPortal({ skipSubscriptionRefresh: true });
+    if (typeof buildAttendance === 'function') buildAttendance();
+    buildDashboard();
+  }
   var saved = await persistAttendanceNow(rec);
-  if (saved && saved.ok === false) {
-    var blockMsg = saved.error === 'subscription_inactive'
-      ? 'حساب الشركة موقوف — لا يمكن تسجيل الانصراف.'
-      : (saved.error === 'rate_limited' ? 'تم تجاوز عدد المحاولات، حاول لاحقاً.' : 'تعذّر تسجيل الانصراف.');
+  if (!saved || saved.ok === false) {
+    if (currentUser === 'emp') {
+      if (recBefore) {
+        Object.keys(rec).forEach(function (k) { delete rec[k]; });
+        Object.assign(rec, recBefore);
+      } else {
+        rec.co = '—';
+        rec.hrs = '—';
+        rec.ot = '—';
+        delete rec._punchType;
+      }
+      rec._pendingRemoteSync = true;
+      if (typeof schedulePendingSyncRetry === 'function') schedulePendingSyncRetry();
+      saveData();
+      buildEmpPortal({ skipSubscriptionRefresh: true });
+      if (typeof buildAttendance === 'function') buildAttendance();
+      buildDashboard();
+    }
+    var errCodeOut = saved && saved.error ? saved.error : 'cloud_unavailable';
+    var errDetailOut = saved && saved.detail ? saved.detail : '';
+    if (isOfficialClosureErrorCode(errCodeOut, errDetailOut)) {
+      var closureHitOut = officialClosureForDate(rec.dateIso) || officialClosureForDate();
+      if (closureHitOut) {
+        showOfficialClosureBlock(closureHitOut, 'تسجيل الانصراف');
+        return;
+      }
+    }
+    if (errCodeOut === 'employee_suspended') {
+      forceEmployeePortalLogout('تم إيقاف الحساب', (saved && saved.message) || SUSPENDED_MSG);
+      return;
+    }
+    var blockMsg = mapAttendanceSaveErrorMessage(errCodeOut, errDetailOut, 'checkout');
     Swal.fire({ icon: 'error', title: 'فشل تسجيل الانصراف', text: blockMsg, ...swalTheme() });
+    await logEmployeePortalEvent('check_out', {
+      empId: emp.id,
+      success: false,
+      geo: geo || null,
+      meta: { error: errCodeOut, location: locationLabel || '', remote_attend: !!(emp && emp.remoteAttend) }
+    });
     return;
   }
   applyServerAttendanceToRecord(rec, saved, emp);
@@ -9161,6 +12210,17 @@ async function checkOut() {
   saveData();
   await persistEmployeeNow(emp);
   logActivity('checkout', 'attendance', 'تسجيل انصراف: ' + emp.name + ' — ' + t, { targetName: emp.name, empId: emp.id, targetEmpId: emp.id });
+  await logEmployeePortalEvent('check_out', {
+    empId: emp.id,
+    success: true,
+    geo: geo || null,
+    meta: {
+      time: t,
+      location: locationLabel || '',
+      remote_attend: !!(emp && emp.remoteAttend),
+      address: geo && geo._trackAddress ? geo._trackAddress : undefined
+    }
+  });
   buildEmpPortal({ skipSubscriptionRefresh: true });
   if (typeof buildAttendance === 'function') buildAttendance();
   buildDashboard();
@@ -9170,13 +12230,230 @@ async function checkOut() {
     buildSalaries();
   }
 
+  var locationInfo = locationLabel ? ('<br>' + locationLabel) : '';
   if (emp.openHours) {
-    Swal.fire({ icon:'success', title:'✅ تم تسجيل الانصراف', html:'الوقت: <b>' + t + '</b><br>مجموع ساعات العمل: <b>' + hrsStr + '</b><br>🕐 دوام وقت مفتوح — يوم كامل', ...swalTheme() });
+    Swal.fire({
+      icon: 'success',
+      title: '✅ تم تسجيل الانصراف',
+      html: 'الوقت: <b>' + t + '</b><br>مجموع ساعات العمل: <b>' + hrsStr + '</b><br>🕐 دوام وقت مفتوح — يوم كامل' + locationInfo,
+      ...swalTheme()
+    });
     return;
   }
 
   var isOvertimeShow = rec.ot && rec.ot !== '—';
-  Swal.fire({ icon:'success', title:'✅ تم تسجيل الانصراف', html:'الوقت: <b>' + t + '</b><br>مجموع ساعات العمل: <b>' + hrsStr + '</b>' + (isOvertimeShow ? '<br>🔵 إضافي: ' + rec.ot : '') + (emp.remoteAttend ? '<br>📍 حضور عن بُعد' : ''), ...swalTheme() });
+  Swal.fire({
+    icon: 'success',
+    title: '✅ تم تسجيل الانصراف',
+    html: 'الوقت: <b>' + t + '</b><br>مجموع ساعات العمل: <b>' + hrsStr + '</b>'
+      + (isOvertimeShow ? '<br>🔵 إضافي: ' + rec.ot : '')
+      + locationInfo,
+    ...swalTheme()
+  });
+}
+
+async function checkIn() {
+  if (_checkInInFlight) return;
+  _checkInInFlight = true;
+  setCheckInButtonBusy(true);
+  var loadingShownAt = 0;
+  try {
+  let emp = getLoggedInEmp();
+  if (!emp && window.loggedInEmpId) {
+    emp = await ensureLoggedInEmployeeLoaded();
+  }
+  if (!emp) {
+    Swal.fire({
+      icon: 'warning',
+      title: 'الحساب غير جاهز',
+      text: 'تعذّر تحميل بيانات الموظف. تحقق من الإنترنت ثم حدّث الصفحة أو أعد مسح QR.',
+      ...swalTheme()
+    });
+    return;
+  }
+  if (!(await guardEmployeeAccountActive())) return;
+  await refreshOfficialClosuresFromCloud();
+  var activeClosure = officialClosureForDate();
+  renderOfficialClosureEmpBanner(activeClosure);
+  bindOfficialClosureAttendanceButtons(activeClosure);
+  if (activeClosure) {
+    showOfficialClosureBlock(activeClosure, 'تسجيل الحضور');
+    return;
+  }
+  var openRec = findOpenAttendanceRecord(emp.id, false);
+  if (checkedIn || openRec) {
+    Swal.fire({ icon:'warning', title:'تم التسجيل مسبقاً', text:'لديك حضور مفتوح — سجّل الانصراف أولاً قبل حضور جديد.', ...swalTheme() });
+    return;
+  }
+  if (!requireSubscription('تسجيل الحضور')) return;
+  if (typeof refreshLoggedInEmployeeFromServer === 'function') {
+    emp = await refreshLoggedInEmployeeFromServer() || emp;
+  }
+  emp = await ensureEmployeeRemoteAttendFresh(emp);
+
+  var geoPackIn = await requireMandatoryPunchGeo({ purpose: 'check_in' });
+  if (!geoPackIn || !geoPackIn.geo) return;
+
+  if (emp.remoteAttend) {
+    if (geoPackIn.address) geoPackIn.geo._trackAddress = geoPackIn.address;
+    var remoteInLabel = buildRemotePunchLocationLabel(emp, 'check_in', geoPackIn);
+    await doCheckIn(emp, remoteInLabel, geoPackIn.geo);
+    return;
+  }
+
+  if (!isValidCoord(Number(appSettings.gpsLat), Number(appSettings.gpsLng))) {
+    Swal.fire({
+      icon: 'error',
+      title: 'موقع الشركة غير مضبوط',
+      text: 'اطلب من المسؤول ضبط موقع الشركة في الإعدادات',
+      ...swalTheme()
+    });
+    return;
+  }
+
+  Swal.fire({
+    title:'📍 جارٍ التحقق من الموقع...',
+    text:'يتم التحقق من موقعك الجغرافي قرب موقع الشركة', allowOutsideClick:false, showConfirmButton:false,
+    ...swalTheme(), didOpen:()=>Swal.showLoading()
+  });
+  loadingShownAt = Date.now();
+  try {
+    var loc = checkCompanyLocationFromGeo(geoPackIn.geo);
+    if (!loc.ok) {
+      await settleAttendanceLoading(loadingShownAt, function () { return Swal.fire({
+        icon:'error',
+        title:'خارج نطاق الشركة',
+        html:'المسافة الحالية: <b>' + loc.distance + ' متر</b><br>نطاق السماح: <b>' + loc.range + ' متر</b>' + (loc.effectiveRange > loc.range ? ' (فعلي: ' + loc.effectiveRange + ' م)' : '') + '<br>دقة الهاتف: <b>' + loc.accuracy + ' متر</b><br><span style="font-size:12px;color:var(--text-muted)">تأكد أن المسؤول ضبط موقع الشركة في الإعدادات. إذا كنت داخل الشركة وما زال الخطأ يظهر، حرّك الهاتف قرب النافذة أو ارفع نطاق السماح قليلاً.</span>',
+        ...swalTheme()
+      }); });
+      return;
+    }
+    var checkInGeo = { lat: loc.lat, lng: loc.lng, accuracy: loc.accuracy };
+    await settleAttendanceLoading(loadingShownAt, function () {
+      return doCheckIn(emp, '📍 داخل موقع الشركة (' + loc.distance + 'م، دقة ' + loc.accuracy + 'م)', checkInGeo);
+    });
+  } catch (err) {
+    await settleAttendanceLoading(loadingShownAt, function () {
+      return Swal.fire({ icon:'error', title:'تعذر التحقق من الموقع', text: err.message || String(err), ...swalTheme() });
+    });
+  }
+  } finally {
+    // نترك قفل الزر بسيطاً لفترة قصيرة لحماية من النقرات المتكررة.
+    setTimeout(function () {
+      _checkInInFlight = false;
+      setCheckInButtonBusy(false);
+    }, 900);
+  }
+}
+
+async function checkOut() {
+  if (_checkOutInFlight) return;
+  _checkOutInFlight = true;
+  setCheckOutButtonBusy(true);
+  var loadingShownAt = 0;
+  try {
+  let emp = getLoggedInEmp();
+  if (!emp && window.loggedInEmpId) {
+    emp = await ensureLoggedInEmployeeLoaded();
+  }
+  if (!emp) {
+    Swal.fire({
+      icon: 'warning',
+      title: 'الحساب غير جاهز',
+      text: 'تعذّر تحميل بيانات الموظف. تحقق من الإنترنت ثم حدّث الصفحة أو أعد مسح QR.',
+      ...swalTheme()
+    });
+    return;
+  }
+  if (!(await guardEmployeeAccountActive())) return;
+  await refreshOfficialClosuresFromCloud();
+  var activeClosure = officialClosureForDate();
+  renderOfficialClosureEmpBanner(activeClosure);
+  bindOfficialClosureAttendanceButtons(activeClosure);
+  if (activeClosure) {
+    showOfficialClosureBlock(activeClosure, 'تسجيل الانصراف');
+    return;
+  }
+  var openRec = findOpenAttendanceRecord(emp.id, false);
+  if (openRec && openRec.co && openRec.co !== '—') {
+    Swal.fire({ icon:'warning', title:'تم التسجيل مسبقاً', text:'لقد سجلت انصرافك بالفعل!', ...swalTheme() });
+    return;
+  }
+  if (!checkedIn && !openRec) {
+    Swal.fire({ icon:'warning', title:'لم تسجل حضورك بعد', text:'يجب تسجيل الحضور أولاً', ...swalTheme() });
+    return;
+  }
+  if (!requireSubscription('تسجيل الانصراف')) return;
+  if (typeof refreshLoggedInEmployeeFromServer === 'function') {
+    emp = await refreshLoggedInEmployeeFromServer() || emp;
+  }
+  emp = await ensureEmployeeRemoteAttendFresh(emp);
+
+  let rec = openRec || findOpenAttendanceRecord(emp.id, false);
+  var recBefore = rec ? JSON.parse(JSON.stringify(rec)) : null;
+  if (!rec) {
+    Swal.fire({ icon:'warning', title:'لم تسجل حضورك بعد', text:'يجب تسجيل الحضور أولاً', ...swalTheme() });
+    return;
+  }
+
+  if (emp.remoteAttend) {
+    var geoPackOut = await requireMandatoryPunchGeo({ purpose: 'check_out' });
+    if (!geoPackOut || !geoPackOut.geo) return;
+    if (geoPackOut.address) geoPackOut.geo._trackAddress = geoPackOut.address;
+    var remoteOutLabel = buildRemotePunchLocationLabel(emp, 'check_out', geoPackOut);
+    await doCheckOut(emp, rec, recBefore, remoteOutLabel, geoPackOut.geo);
+    return;
+  }
+
+  var geoPackOutCo = await requireMandatoryPunchGeo({ purpose: 'check_out' });
+  if (!geoPackOutCo || !geoPackOutCo.geo) return;
+
+  if (!isValidCoord(Number(appSettings.gpsLat), Number(appSettings.gpsLng))) {
+    Swal.fire({
+      icon: 'error',
+      title: 'موقع الشركة غير مضبوط',
+      text: 'اطلب من المسؤول ضبط موقع الشركة في الإعدادات',
+      ...swalTheme()
+    });
+    return;
+  }
+
+  Swal.fire({
+    title:'📍 جارٍ التحقق من الموقع...',
+    text:'يتم التحقق من موقعك الجغرافي قرب موقع الشركة',
+    allowOutsideClick:false,
+    showConfirmButton:false,
+    ...swalTheme(),
+    didOpen: function () { Swal.showLoading(); }
+  });
+  loadingShownAt = Date.now();
+  try {
+    var locOut = checkCompanyLocationFromGeo(geoPackOutCo.geo);
+    if (!locOut.ok) {
+      await settleAttendanceLoading(loadingShownAt, function () { return Swal.fire({
+        icon:'error',
+        title:'خارج نطاق الشركة',
+        html:'المسافة الحالية: <b>' + locOut.distance + ' متر</b><br>نطاق السماح: <b>' + locOut.range + ' متر</b>' + (locOut.effectiveRange > locOut.range ? ' (فعلي: ' + locOut.effectiveRange + ' م)' : '') + '<br>دقة الهاتف: <b>' + locOut.accuracy + ' متر</b><br><span style="font-size:12px;color:var(--text-muted)">لا يمكن تسجيل الانصراف خارج موقع الشركة.</span>',
+        ...swalTheme()
+      }); });
+      return;
+    }
+    var checkoutGeo = { lat: locOut.lat, lng: locOut.lng, accuracy: locOut.accuracy };
+    var checkoutLabel = '📍 داخل موقع الشركة (' + locOut.distance + 'م، دقة ' + locOut.accuracy + 'م)';
+    await settleAttendanceLoading(loadingShownAt, function () {
+      return doCheckOut(emp, rec, recBefore, checkoutLabel, checkoutGeo);
+    });
+  } catch (err) {
+    await settleAttendanceLoading(loadingShownAt, function () {
+      return Swal.fire({ icon:'error', title:'تعذر التحقق من الموقع', text: err.message || String(err), ...swalTheme() });
+    });
+  }
+  } finally {
+    setTimeout(function () {
+      _checkOutInFlight = false;
+      setCheckOutButtonBusy(false);
+    }, 900);
+  }
 }
 
 // ======= ACTIONS =======
@@ -9205,15 +12482,18 @@ function empFormHtml(emp) {
     '<motionless class="emp-field"><label>الوظيفة <span class="req">*</span></label><select id="emp-role" onchange="onEmpRoleChange()"><option value="">— اختر —</option>' + jobOpts + '<option value="__custom__"' + (currentRole && !roleInList ? ' selected' : '') + '>✏️ وظيفة أخرى...</option></select><input id="emp-role-custom" placeholder="اكتب اسم الوظيفة" value="' + (currentRole && !roleInList ? esc(currentRole) : '') + '" style="margin-top:8px;display:' + (currentRole && !roleInList ? 'block' : 'none') + '"></motionless>',
     '</motionless>',
     '<motionless class="emp-field-row">',
-    '<motionless class="emp-field"><label>رقم الهاتف</label><input id="emp-phone" dir="ltr" value="' + (emp && emp.phone !== '—' ? esc(emp.phone) : '') + '"></motionless>',
+    '<motionless class="emp-field"><label>رقم الهاتف <span class="req">*</span></label><input id="emp-phone" dir="ltr" placeholder="07701234567" value="' + (emp && emp.phone !== '—' ? esc(emp.phone) : '') + '"></motionless>',
     '<motionless class="emp-field"><label>نوع الراتب <span class="req">*</span></label><select id="emp-salary-type" onchange="onSalaryTypeChange()"><option value="monthly"' + (emp && emp.salaryType === 'monthly' ? ' selected' : '') + (!emp || !emp.salaryType ? ' selected' : '') + '>📋 راتب شهري</option><option value="biweekly"' + (emp && emp.salaryType === 'biweekly' ? ' selected' : '') + '>📅 راتب كل ' + getBiweeklyPeriodDays() + ' يوم</option><option value="commission"' + (emp && emp.salaryType === 'commission' ? ' selected' : '') + '>💰 راتب عمولة</option></select></motionless>',
+    '</motionless>',
+    '<motionless class="emp-field-row">',
+    '<motionless class="emp-field"><label>تاريخ المباشرة</label><input type="date" id="emp-hire-date" value="' + (emp ? esc(emp.hireDate || '') : (typeof todayIsoDate === 'function' ? todayIsoDate() : '')) + '"><span class="emp-field-hint">لا يُحتسب أي غياب قبل هذا التاريخ. اتركه فارغاً لعدم التقييد.</span></motionless>',
     '</motionless>',
     '<motionless class="emp-field-row" id="emp-salary-amount-row">',
     '<motionless class="emp-field"><label>الراتب الشهري (IQD) <span class="req">*</span></label><input type="number" id="emp-salary" min="0" value="' + (emp ? emp.salary : '') + '" oninput="autoCalcDailyRate()"></motionless>',
     '<motionless class="emp-field"><label>المعدل اليومي (IQD)</label><input type="number" id="emp-daily-rate" min="0" value="' + (emp && emp.dailyRate ? emp.dailyRate : '') + '" placeholder="يُحسب تلقائياً من الراتب ÷ ' + getStandardMonthDays() + '"></motionless>',
     '</motionless>',
     '<motionless class="emp-field-row">',
-    '<motionless class="emp-field" id="emp-biweekly-half-field" style="display:none"><label>راتب كل ' + getBiweeklyPeriodDays() + ' يوم (IQD)</label><input type="number" id="emp-salary-half" min="0" value="' + (emp && emp.salaryHalf ? emp.salaryHalf : '') + '" placeholder="نصف الراتب" oninput="autoCalcDailyRate()"></motionless>',
+    '<motionless class="emp-field" id="emp-biweekly-half-field" style="display:none"><label>راتب كل ' + getBiweeklyPeriodDays() + ' يوم (IQD) <span class="req">*</span></label><input type="number" id="emp-salary-half" min="0" value="' + (emp && emp.salaryHalf ? emp.salaryHalf : '') + '" placeholder="نصف الراتب" oninput="autoCalcDailyRate()"></motionless>',
     '</motionless>',
     '<motionless class="emp-field" id="emp-commission-note" style="display:none;padding:10px;background:rgba(246,224,94,0.08);border:1px solid rgba(246,224,94,0.2);border-radius:10px;margin-bottom:8px"><p style="font-size:13px;color:#f6e05e;margin:0">💰 <b>راتب عمولة:</b> لا يُحتسب راتب ثابت — فقط تسجيل حضور وانصراف. يتم احتساب الراتب يدوياً حسب العمولة المتفق عليها.</p></motionless>',
     '</section>',
@@ -9329,11 +12609,33 @@ function toggleEmpOptionFromCard(card) {
   syncEmpOptionCards();
 }
 
+function isEmpMoneyFieldEmpty(id) {
+  var el = document.getElementById(id);
+  return !el || String(el.value || '').trim() === '';
+}
+
+function getEmpFormRoleFieldId(roleSelectValue) {
+  return roleSelectValue === '__custom__' ? 'emp-role-custom' : 'emp-role';
+}
+
+function showEmpFormFieldError(fieldId, message) {
+  Swal.showValidationMessage(message);
+  setTimeout(function () {
+    var el = fieldId ? document.getElementById(fieldId) : null;
+    if (el) {
+      el.focus();
+      if (el.scrollIntoView) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }, 80);
+  return false;
+}
+
 function readEmpForm() {
   const name = document.getElementById('emp-name').value.trim();
   const dept = document.getElementById('emp-dept').value;
   const roleSelect = document.getElementById('emp-role');
-  let role = roleSelect ? roleSelect.value : '';
+  const roleSelectValue = roleSelect ? roleSelect.value : '';
+  let role = roleSelectValue;
   if (role === '__custom__') {
     role = (document.getElementById('emp-role-custom')?.value || '').trim();
   } else {
@@ -9341,6 +12643,8 @@ function readEmpForm() {
   }
   const phone = document.getElementById('emp-phone').value.trim();
   const salaryType = document.getElementById('emp-salary-type')?.value || 'monthly';
+  const salaryEmpty = isEmpMoneyFieldEmpty('emp-salary');
+  const salaryHalfEmpty = salaryType === 'biweekly' && isEmpMoneyFieldEmpty('emp-salary-half');
   const salary = readMoneyValue('emp-salary', 0);
   const salaryHalf = salaryType === 'biweekly' ? (readMoneyValue('emp-salary-half', 0) || Math.floor(salary / 2)) : 0;
   const dailyRate = salaryType === 'commission' ? 0 : (readMoneyValue('emp-daily-rate', 0) || calcDailyRateFromSalary(salaryType === 'biweekly' ? readMoneyValue('emp-salary-half', 0) : salary, salaryType));
@@ -9348,18 +12652,49 @@ function readEmpForm() {
   const lateMin = readMoneyValue('emp-late', 0);
   const checkIn = document.getElementById('emp-checkin').value || '08:00';
   const checkOut = document.getElementById('emp-checkout').value || '17:00';
+  const hireDate = (document.getElementById('emp-hire-date')?.value || '').slice(0, 10);
   const ip1 = document.getElementById('emp-ip-1')?.value.trim() || '';
   const ip2 = document.getElementById('emp-ip-2')?.value.trim() || '';
   const fp1 = document.getElementById('emp-fp-1')?.value.trim() || '';
   const fp2 = document.getElementById('emp-fp-2')?.value.trim() || '';
-  if (!name) { Swal.showValidationMessage('الاسم الكامل مطلوب'); return false; }
-  if (!dept) { Swal.showValidationMessage('اختر القسم'); return false; }
-  if (!role) { Swal.showValidationMessage('الوظيفة مطلوبة'); return false; }
-  if (salaryType !== 'commission' && (salary < 0)) { Swal.showValidationMessage('أدخل راتباً صحيحاً'); return false; }
+
+  var fieldIdMap = {
+    name: 'emp-name',
+    dept: 'emp-dept',
+    role: getEmpFormRoleFieldId(roleSelectValue),
+    phone: 'emp-phone',
+    salary: 'emp-salary',
+    salaryHalf: 'emp-salary-half'
+  };
+  var draft = {
+    name: name,
+    dept: dept,
+    role: role,
+    phone: phone,
+    salary: salary,
+    salaryType: salaryType,
+    salaryHalf: salaryHalf,
+    _salaryEmpty: salaryEmpty,
+    _salaryHalfEmpty: salaryHalfEmpty
+  };
+  if (typeof KynoValidation !== 'undefined' && KynoValidation.validateEmployee) {
+    var check = KynoValidation.validateEmployee(draft);
+    if (!check.valid) {
+      var firstKey = check.firstField || (check.fieldErrors && Object.keys(check.fieldErrors)[0]);
+      var msg = (check.fieldErrors && firstKey && check.fieldErrors[firstKey]) || (check.errors && check.errors[0]) || 'يرجى تعبئة الحقول المطلوبة';
+      return showEmpFormFieldError(fieldIdMap[firstKey] || null, msg);
+    }
+  } else {
+    if (!name) return showEmpFormFieldError('emp-name', 'يجب أن تملأ حقل الاسم الكامل');
+    if (!dept) return showEmpFormFieldError('emp-dept', 'يجب أن تملأ حقل القسم');
+    if (!role) return showEmpFormFieldError(fieldIdMap.role, 'يجب أن تملأ حقل الوظيفة');
+    if (!phone) return showEmpFormFieldError('emp-phone', 'يجب أن تملأ حقل الهاتف');
+  }
+
   const remoteAttend = document.getElementById('emp-remote-attend')?.checked || false;
   const openHours = document.getElementById('emp-open-hours')?.checked || false;
   const includeOvertimeInSalary = document.getElementById('emp-include-ot')?.checked || false;
-  return { name, dept, role, phone: phone || '—', salary, salaryType, salaryHalf, dailyRate, days, lateMin, checkIn, checkOut, ip1, ip2, fp1, fp2, remoteAttend, openHours, includeOvertimeInSalary };
+  return { name, dept, role, phone, salary, salaryType, salaryHalf, dailyRate, days, lateMin, checkIn, checkOut, hireDate, ip1, ip2, fp1, fp2, remoteAttend, openHours, includeOvertimeInSalary };
 }
 
 function buildEmpDevices(empId, ip1, ip2, prev, fp1, fp2, forceFresh) {
@@ -9463,6 +12798,25 @@ async function autoSyncEmployeeToSupabase(emp, retries) {
         return { ok: true };
       }
       var errMsg = (typeof sb_getLastEmployeeSaveError === 'function') ? sb_getLastEmployeeSaveError() : '';
+      var errLow = String(errMsg || '').toLowerCase();
+      if (errLow.indexOf('tenant_mismatch') >= 0 || errLow.indexOf('سياق الشركة') >= 0) {
+        var oldId = parseInt(emp.id, 10) || 0;
+        var nextGlobal = oldId + 1;
+        if (typeof refreshNextEmpIdBeforeAdd === 'function') {
+          await refreshNextEmpIdBeforeAdd();
+          if (window.nextEmpId && window.nextEmpId > nextGlobal) nextGlobal = window.nextEmpId;
+        }
+        emp.id = nextGlobal;
+        window.nextEmpId = nextGlobal + 1;
+        if (emp.devices && emp.devices.length) {
+          emp.devices.forEach(function (d) {
+            if (d) d.barcode = 'ATT-' + emp.id + '-D' + (d.slot || 1);
+          });
+        }
+        if (typeof upsertEmployeeIntoStore === 'function') upsertEmployeeIntoStore(emp);
+        console.warn('autoSyncEmployeeToSupabase: reallocated employee id', oldId, '→', emp.id);
+        if (i < attempts - 1) continue;
+      }
       if (typeof sb_isPermanentEmployeeSaveError === 'function' && sb_isPermanentEmployeeSaveError(errMsg)) {
         break;
       }
@@ -9541,6 +12895,46 @@ function describeSupabaseSaveError(msg) {
   return sanitizeCloudUserText(String(msg));
 }
 
+function describeDeviceLinkError(err) {
+  var raw = typeof err === 'string' ? err : ((err && (err.error || err.message || err.code || err.details)) || '');
+  var m = String(raw || '').toLowerCase();
+  if (!m) return 'تعذّر ربط الجهاز في السحابة — حاول مرة أخرى';
+  if (m.indexOf('failed to fetch') >= 0 || m.indexOf('network') >= 0 || m.indexOf('fetch') >= 0) {
+    return 'تعذّر الوصول إلى Supabase من الهاتف. تأكد أن الموقع مفتوح على HTTPS وأن Supabase غير محجوب من الشبكة.';
+  }
+  if (m.indexOf('could not find the function') >= 0 || m.indexOf('pgrst202') >= 0 || m.indexOf('schema cache') >= 0) {
+    return 'دالة ربط الجهاز غير موجودة في قاعدة البيانات — أعد تطبيق المايغريشنات أو نفّذ SQL إصلاح RPC.';
+  }
+  if (m.indexOf('could not choose') >= 0 || m.indexOf('pgrst203') >= 0 || m.indexOf('overload') >= 0) {
+    return 'يوجد أكثر من نسخة لدالة ربط الجهاز في قاعدة البيانات — يجب حذف النسخة القديمة من RPC.';
+  }
+  if (m.indexOf('permission denied') >= 0 || m.indexOf('42501') >= 0) {
+    return 'لا توجد صلاحية لتنفيذ دالة ربط الجهاز — راجع GRANT EXECUTE للدالة.';
+  }
+  if (m.indexOf('subscription_inactive') >= 0) {
+    return 'اشتراك الشركة غير فعال — فعّل الاشتراك ثم امسح QR مرة أخرى.';
+  }
+  if (m.indexOf('rate_limited') >= 0) {
+    return 'محاولات كثيرة خلال وقت قصير — انتظر دقائق ثم أعد مسح QR.';
+  }
+  if (m.indexOf('official_closure_active') >= 0) {
+    return 'الرابط معطل حالياً بسبب عطلة رسمية للشركة.';
+  }
+  if (m.indexOf('device_already_linked') >= 0) {
+    return 'هذا QR مرتبط بجهاز آخر مسبقاً.';
+  }
+  if (m.indexOf('fingerprint_already_used') >= 0 || m.indexOf('fingerprint_ambiguous') >= 0) {
+    return 'بصمة هذا المتصفح متشابهة مع جهاز آخر. حدّث الصفحة ثم امسح QR جديداً، أو امسح بصمة الجهاز من لوحة الإدارة ثم أعد الربط.';
+  }
+  if (m.indexOf('not_found') >= 0 || m.indexOf('invalid_token') >= 0) {
+    return 'رمز QR غير منشور أو قديم — افتح عرض QR من الإدارة وانتظر QR جاهز ثم امسح QR جديد.';
+  }
+  if (m.indexOf('invalid_fingerprint') >= 0) {
+    return 'تعذّر إنشاء بصمة الجهاز — حدّث الصفحة وحاول مرة أخرى.';
+  }
+  return sanitizeCloudUserText(String(raw));
+}
+
 function updateOpenEmpDeviceFields(emp) {
   if (!emp) return;
   normalizeEmployee(emp);
@@ -9612,6 +13006,7 @@ async function openEmpForm(mode, id) {
     const v = r.value;
     let savedEmp = null;
     let newAttRec = null;
+    const _prevHireDate = (mode === 'edit' && emp) ? String(emp.hireDate || '').slice(0, 10) : '';
     if (mode === 'add') {
       if (!(await canAddEmployeeUnderCompanyLimit(true))) {
         resumeRemoteSync(0);
@@ -9667,6 +13062,8 @@ async function openEmpForm(mode, id) {
         dailyRate: v.dailyRate || 0,
         remoteAttend: !!v.remoteAttend, openHours: !!v.openHours,
         includeOvertimeInSalary: !!v.includeOvertimeInSalary,
+        hireDate: v.hireDate || '',
+        active: true,
         devices: buildEmpDevices(newId, v.ip1, v.ip2, null, v.fp1, v.fp2, true),
         _pendingRemoteSync: true,
         _freshDevices: true,
@@ -9694,6 +13091,7 @@ async function openEmpForm(mode, id) {
         dailyRate: v.dailyRate || 0,
         remoteAttend: !!v.remoteAttend, openHours: !!v.openHours,
         includeOvertimeInSalary: !!v.includeOvertimeInSalary,
+        hireDate: v.hireDate || '',
         avatar: pickAvatar(v.name),
         devices: buildEmpDevices(emp.id, v.ip1, v.ip2, prevDev, v.fp1, v.fp2),
         _localEmpEditAt: Date.now()
@@ -9717,7 +13115,7 @@ async function openEmpForm(mode, id) {
     }
     _restoreFormSalary(savedEmp);
     saveData();
-    const syncResult = await autoSyncEmployeeToSupabase(savedEmp, 5);
+    const syncResult = await autoSyncEmployeeToSupabase(savedEmp, mode === 'add' ? 25 : 5);
     _restoreFormSalary(savedEmp);
     if (syncResult.ok && typeof applyEmployeeSalaryFromForm === 'function') {
       applyEmployeeSalaryFromForm(savedEmp, v);
@@ -9740,6 +13138,21 @@ async function openEmpForm(mode, id) {
     savedEmp._localEmpEditAt = Date.now();
     upsertEmployeeIntoStore(savedEmp);
     saveData();
+    if (currentUser !== 'emp') {
+      var _newHireDate = String(savedEmp.hireDate || '').slice(0, 10);
+      if (_newHireDate && (mode === 'add' || _newHireDate !== _prevHireDate)) {
+        try {
+          focusAttendanceHireMonth(savedEmp.id);
+          var _bf = await backfillHireDateAbsences(savedEmp);
+          if (typeof clearSalaryCacheForEmployee === 'function') clearSalaryCacheForEmployee(savedEmp.id);
+          if (typeof buildAttendance === 'function') buildAttendance();
+          if (typeof buildDashboard === 'function') buildDashboard();
+          if (_bf && _bf.created > 0 && typeof BasmaToast !== 'undefined' && BasmaToast.success) {
+            BasmaToast.success('تم إنشاء ' + _bf.created + ' سجل غياب قبل تاريخ المباشرة — اعرض «هذا الشهر» في الحضور');
+          }
+        } catch (e) { console.warn('hire-date absences backfill:', e); }
+      }
+    }
     refreshAll();
     resumeRemoteSync(30000);
     if (mode === 'add') {
@@ -9771,14 +13184,21 @@ async function openEmpForm(mode, id) {
       } else {
         scheduleAutoSupabaseSync('employee-add-retry');
         var syncHint = describeSupabaseSaveError(syncResult.reason);
+        employees = (employees || []).filter(function (x) { return !x || x.id !== savedEmp.id; });
+        attData = (attData || []).filter(function (x) { return !x || x.empId !== savedEmp.id; });
+        if (typeof clearSalaryCacheForEmployee === 'function') clearSalaryCacheForEmployee(savedEmp.id);
+        if (typeof upsertEmployeeIntoStore === 'function') {
+          window.employees = employees;
+        }
+        refreshAll();
         Swal.fire({
-          icon: 'warning',
-          title: 'تم الحفظ محلياً فقط',
-          html: 'تمت إضافة <b>' + esc(v.name) + '</b> على هذا الجهاز.<br><span style="font-size:13px;color:#fc8181">مسح QR من الهاتف <b>لن يعمل</b> حتى يظهر «تم إضافة الموظف — QR جاهز».</span><br><span style="font-size:12px;color:var(--text-secondary)">' + esc(syncHint) + '</span>',
+          icon: 'error',
+          title: 'لم يتم حفظ الموظف',
+          html: 'تعذّر حفظ <b>' + esc(v.name) + '</b> في السحابة، لذلك لم يتم اعتماده في النظام.<br><span style="font-size:13px;color:#fc8181">لا يوجد حفظ محلي، وQR لن يعمل حتى يتم الحفظ في قاعدة البيانات.</span><br><span style="font-size:12px;color:var(--text-secondary)">' + esc(syncHint) + '</span>',
           ...swalTheme(),
           confirmButtonText: 'حسناً'
         });
-        logActivity('add', 'employees', 'إضافة موظف (محلي): ' + v.name + ' — ' + v.dept, { targetName: v.name });
+        logActivity('add', 'employees', 'فشل إضافة موظف للسحابة: ' + v.name + ' — ' + v.dept, { targetName: v.name });
       }
     } else {
       Swal.fire({ icon: 'success', title: 'تم حفظ التعديلات', ...swalTheme(), timer: 1800, showConfirmButton: false });
@@ -9866,6 +13286,53 @@ function deleteEmp(id) {
   });
 }
 
+// المرحلة 3 — تفعيل/إيقاف حساب الموظف (لا يحذف أي بيان)
+function toggleEmployeeActive(id) {
+  if (!requireActionPermission('employees', 'edit')) return;
+  const e = employees.find(x => x.id === id);
+  if (!e) return;
+  const suspend = e.active !== false;
+  Swal.fire({
+    title: suspend ? 'إيقاف حساب الموظف' : 'تفعيل حساب الموظف',
+    html: suspend
+      ? 'سيتم إيقاف «' + esc(e.name) + '».<br>لن يتمكن من الدخول أو تسجيل الحضور/الانصراف.<br><span style="font-size:12px;color:var(--text-muted)">لن يُحذف أي بيان ويبقى ظاهراً في التقارير.</span>'
+      : 'سيتم تفعيل «' + esc(e.name) + '» وإرجاع العمل طبيعياً.',
+    icon: 'warning', showCancelButton: true,
+    confirmButtonText: suspend ? 'نعم، أوقف الحساب' : 'نعم، فعّل الحساب',
+    cancelButtonText: 'إلغاء',
+    ...swalTheme(),
+    confirmButtonColor: suspend ? '#e53e3e' : '#00d4aa'
+  }).then(async r => {
+    if (!r.isConfirmed) return;
+    if (typeof sb_setEmployeeActive !== 'function') {
+      Swal.fire({ icon:'error', title:'غير متاح', text:'طبقة السحابة غير محمّلة — أعد تحميل الصفحة.', ...swalTheme() });
+      return;
+    }
+    pauseRemoteSync(8000);
+    var res;
+    try {
+      res = await sb_setEmployeeActive(id, !suspend);
+    } catch (err) {
+      res = { ok: false, error: String(err && err.message || err) };
+    }
+    if (!res || res.ok !== true) {
+      resumeRemoteSync(0);
+      var msg = res && res.error === 'tenant_mismatch'
+        ? 'لا تملك صلاحية تعديل هذا الموظف.'
+        : 'تعذّر تحديث حالة الحساب في السحابة — تحقق من الاتصال ثم أعد المحاولة.';
+      Swal.fire({ icon:'error', title:'تعذّر التحديث', text: msg, ...swalTheme() });
+      return;
+    }
+    e.active = !suspend;
+    e._localEmpEditAt = Date.now();
+    logActivity('update', 'employees', (suspend ? 'إيقاف حساب الموظف: ' : 'تفعيل حساب الموظف: ') + e.name, { targetName: e.name });
+    saveData();
+    refreshAll();
+    Swal.fire({ icon:'success', title: suspend ? 'تم إيقاف الحساب' : 'تم تفعيل الحساب', text: e.name, ...swalTheme(), timer:1800, showConfirmButton:false });
+    resumeRemoteSync(7000);
+  });
+}
+
 
 function downloadSalary() {
   const emp = getLoggedInEmp();
@@ -9883,7 +13350,7 @@ function downloadSalary() {
     (sal.manualDeduct || 0).toLocaleString() + ' IQD',
     ((sal.leaveDeduct || 0) + (sal.absentDeduct || 0)).toLocaleString() + ' IQD',
     (sal.bonus || 0).toLocaleString() + ' IQD',
-    (sal.final || 0).toLocaleString() + ' IQD',
+    (sal.final != null ? sal.final : 0).toLocaleString() + ' IQD',
     emp.salStatus || 'معلق'
   ]];
   const html = buildPrintPage('كشف راتب الموظف', esc(emp.name) + ' — ' + esc(emp.dept || '—'), headers, rows, 'table{min-width:560px}');
@@ -9896,7 +13363,7 @@ function downloadSalary() {
       '<div><b>الخصومات/الغرامات:</b> ' + (sal.manualDeduct || 0).toLocaleString() + ' IQD</div>' +
       '<div><b>الإجازات والغياب:</b> ' + ((sal.leaveDeduct || 0) + (sal.absentDeduct || 0)).toLocaleString() + ' IQD</div>' +
       '<div><b>المكافآت:</b> ' + (sal.bonus || 0).toLocaleString() + ' IQD</div>' +
-      '<hr style="border-color:var(--border);opacity:.4"><div style="font-size:18px;color:var(--accent)"><b>الصافي:</b> ' + (sal.final || 0).toLocaleString() + ' IQD</div>' +
+      '<hr style="border-color:var(--border);opacity:.4"><div style="font-size:18px"><b>الصافي:</b> ' + salaryNetInlineHtml(sal.final, false) + '</div>' +
     '</div>',
     showDenyButton: true,
     showCancelButton: true,
@@ -9987,10 +13454,15 @@ function addSalaryRecord() {
           if (!r.date) return;
           const rDate = new Date(r.date.replace(/\//g, '-') + 'T00:00:00');
           if (rDate >= fromDate && rDate <= toDate) {
-            if (r.ci && r.ci !== '—') {
+            const hasCi = r.ci && r.ci !== '—';
+            const hasCo = r.co && r.co !== '—';
+            if (hasCi && hasCo) {
               attendDays++;
-              if (r.status === 'متأخر') { lateDays++; totalLateMin += parseInt(r.late) || 0; }
-              totalOvertimeMin += parseDurationMinutes(r.ot);
+              if (!emp.openHours && hasCi && hasCo) {
+                let lateMin = calcAttendanceShortMinutes(emp, r);
+                if (lateMin > 0) { lateDays++; totalLateMin += lateMin; }
+              }
+              if (!emp.openHours) totalOvertimeMin += parseDurationMinutes(r.ot);
             } else if (r.status === 'غياب') {
               absentDays++;
             }
@@ -10000,7 +13472,7 @@ function addSalaryRecord() {
         const totalDays = Math.max(1, Math.round((toDate - fromDate) / (1000 * 60 * 60 * 24)) + 1);
         const absentDaysTotal = emp.openHours ? 0 : Math.max(0, totalDays - attendDays - absentDays);
         const daily = getEmpDailyRate(emp);
-        const autoLateDeduct = (isComm || emp.openHours) ? 0 : Math.round(totalLateMin * getEmpLateDeductRate(emp));
+        const autoLateDeduct = calcLateDeductAmount(emp, totalLateMin, daily);
         const autoAbsentDeduct = (isComm || emp.openHours) ? 0 : Math.round((absentDays + absentDaysTotal) * daily);
         const autoDeduct = autoLateDeduct + autoAbsentDeduct;
         const autoOt = (isComm || emp.openHours) ? 0 : Math.round((totalOvertimeMin / 60) * (appSettings.overtimeHourlyRate || 30000));
@@ -10008,12 +13480,12 @@ function addSalaryRecord() {
         summaryEl.innerHTML = '<div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px">' +
           '<span>📅 المدة: <b>' + totalDays + '</b> يوم</span>' +
           '<span>✅ الحضور: <b>' + attendDays + '</b> يوم</span>' +
-          '<span>🟡 التأخير: <b>' + lateDays + '</b> يوم</span>' +
+          '<span>🟡 نقص الدوام: <b>' + lateDays + '</b> يوم</span>' +
           '<span>🔴 الغياب: <b>' + (absentDays + absentDaysTotal) + '</b> يوم</span>' +
           (emp.openHours ? '<span style="color:#63b3ed">🕐 دوام مفتوح: لا تأخير/انصراف مبكر</span>' : '') +
           '</div>' +
           (!isComm ? '<div style="margin-top:6px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px">' +
-          '<span style="color:#fc8181">خصم تأخير: <b>' + autoLateDeduct.toLocaleString() + '</b></span>' +
+          '<span style="color:#fc8181">خصم نقص دوام: <b>' + autoLateDeduct.toLocaleString() + '</b></span>' +
           '<span style="color:#fc8181">خصم غياب: <b>' + autoAbsentDeduct.toLocaleString() + '</b></span>' +
           '<span style="color:#63b3ed">إضافي: <b>' + autoOt.toLocaleString() + '</b></span></div>' : '');
 
@@ -10041,7 +13513,7 @@ function addSalaryRecord() {
       const toDate = document.getElementById('sal-rec-to')?.value || '';
       if (!month) { Swal.showValidationMessage('أدخل اسم الشهر'); return false; }
       var monthIso = fromDate ? String(fromDate).slice(0, 7) : salaryPeriodKey(emp.salaryType || 'monthly');
-      return { month, monthIso, month_iso: monthIso, base, ot, deduct, final: Math.max(0, base + ot - deduct), net: Math.max(0, base + ot - deduct), status, fromDate, toDate };
+      return { month, monthIso, month_iso: monthIso, base, ot, deduct, final: base + ot - deduct, net: base + ot - deduct, status, fromDate, toDate };
     }
   }).then(async result => {
     if (result.isConfirmed && result.value) {
@@ -10090,7 +13562,7 @@ function editSalaryRecord(idx) {
       const deduct = parseInt(document.getElementById('sal-edit-deduct')?.value) || 0;
       const status = document.getElementById('sal-edit-status')?.value || 'مدفوع';
       if (!month) { Swal.showValidationMessage('أدخل اسم الشهر'); return false; }
-      return { month, base, ot, deduct, net: Math.max(0, base - deduct), status };
+      return { month, base, ot, deduct, net: base + ot - deduct, status };
     }
   }).then(async result => {
     if (result.isConfirmed && result.value) {
@@ -10407,6 +13879,8 @@ if (typeof window !== 'undefined') {
   window.isEmployeeRecentlyDeleted = isEmployeeRecentlyDeleted;
   window.clearEmployeeDeletedLocally = clearEmployeeDeletedLocally;
   window.clearSalaryCacheForEmployee = clearSalaryCacheForEmployee;
+  window.syncSalaryAfterAttendanceChange = syncSalaryAfterAttendanceChange;
+  window.getBillableLateMinutes = getBillableLateMinutes;
   window.refreshSalaryUiAfterPayrollChange = refreshSalaryUiAfterPayrollChange;
   window.prefetchSalaryPreviews = prefetchSalaryPreviews;
   window.clearTenantBrowserCaches = clearTenantBrowserCaches;
@@ -10416,6 +13890,15 @@ if (typeof window !== 'undefined') {
   window.refreshEmployeeClientProfileById = refreshEmployeeClientProfileById;
   window.refreshLoggedInEmployeeFromServer = refreshLoggedInEmployeeFromServer;
   window.refreshLoggedInEmployeeAttendance = refreshLoggedInEmployeeAttendance;
+  window.getEmpPortalAttendanceRows = getEmpPortalAttendanceRows;
+  window.fetchAllEmployeeAttendanceFromCloud = fetchAllEmployeeAttendanceFromCloud;
+  window.mergeAttendanceRangeFromCloud = mergeAttendanceRangeFromCloud;
+  window.requireMandatoryPunchGeo = requireMandatoryPunchGeo;
+  window.isAdminOnlyAbsenceRecord = isAdminOnlyAbsenceRecord;
+  window.isPunchAttendanceRecord = isPunchAttendanceRecord;
+  window.isHireDateBackfillAbsence = isHireDateBackfillAbsence;
+  window.backfillAllHireDateAbsences = backfillAllHireDateAbsences;
+  window.focusAttendanceHireMonth = focusAttendanceHireMonth;
   window.refreshLoggedInEmployeeNotifications = refreshLoggedInEmployeeNotifications;
   window.refreshLoggedInEmployeeSalaryHistory = refreshLoggedInEmployeeSalaryHistory;
   window.startEmployeePortalPolling = startEmployeePortalPolling;
@@ -10425,6 +13908,17 @@ if (typeof window !== 'undefined') {
   window.clearAdminSessionForEmployeeClient = clearAdminSessionForEmployeeClient;
   window.ensureEmployeeTenantContext = ensureEmployeeTenantContext;
   window.ensureEmployeeFromServerAccess = ensureEmployeeFromServerAccess;
+  window.restoreEmployeeDeviceSession = restoreEmployeeDeviceSession;
+  window.getCachedEmployeeSessionIds = getCachedEmployeeSessionIds;
+  window.resolveRegisteredEmployeeFromServer = resolveRegisteredEmployeeFromServer;
+  window.tryAutoAdoptBrowserFingerprint = tryAutoAdoptBrowserFingerprint;
+  window.applyEmpPortalSubscriptionLock = applyEmpPortalSubscriptionLock;
+  window.refreshEmployeeSubscriptionForEmp = refreshEmployeeSubscriptionForEmp;
+  window.markEmployeeSessionActive = markEmployeeSessionActive;
+  window.clearRegisteredDeviceCache = clearRegisteredDeviceCache;
+  window.showEmpPortalStatusBanner = showEmpPortalStatusBanner;
+  window.ensureLoggedInEmployeeLoaded = ensureLoggedInEmployeeLoaded;
+  window.displayEmpLoginNotice = displayEmpLoginNotice;
   window.upsertEmployeeIntoStore = upsertEmployeeIntoStore;
   window.deduplicateAllDeviceTokens = deduplicateAllDeviceTokens;
   window.pauseRemoteSync = pauseRemoteSync;
@@ -10437,9 +13931,25 @@ if (typeof window !== 'undefined') {
   window.todayIsoDate = todayIsoDate;
   window.isAttendanceRecordToday = isAttendanceRecordToday;
   window.formatAttendanceDisplayDate = formatAttendanceDisplayDate;
+  window.applyAttendanceFilters = applyAttendanceFilters;
+  window.openOfficialClosureForm = openOfficialClosureForm;
+  window.deleteOfficialClosure = deleteOfficialClosure;
+  window.renderOfficialClosuresList = renderOfficialClosuresList;
+  window.officialClosureForDate = officialClosureForDate;
+  window.refreshOfficialClosuresFromCloud = refreshOfficialClosuresFromCloud;
+  window.countOfficialClosureDaysBetween = countOfficialClosureDaysBetween;
   window.deleteAttRecordsBatch = deleteAttRecordsBatch;
+  window.loadAttendanceForBatchDelete = loadAttendanceForBatchDelete;
   window.normalizeAttendanceStore = normalizeAttendanceStore;
   window.dedupeAttendanceRecords = dedupeAttendanceRecords;
+  window.attendanceRecordIso = attendanceRecordIso;
+  window.attendanceRecordKey = attendanceRecordKey;
+  window.previewGpsMap = previewGpsMap;
+  window.scheduleGpsMapPreview = scheduleGpsMapPreview;
+  window.useMyLocationForCompany = useMyLocationForCompany;
+  window.openCompanyLocationMap = openCompanyLocationMap;
+  window.copyCompanyCoords = copyCompanyCoords;
+  window.saveGpsSettings = saveGpsSettings;
   window.formatAppTimeAmPm = formatAppTimeAmPm;
   window.syncSaasSessionContext = syncSaasSessionContext;
   window.getSaasSessionUser = getSaasSessionUser;

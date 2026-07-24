@@ -68,6 +68,7 @@ export function buildEmployees() {
           <div class="emp-name">${esc(e.name)}</div>
           <div class="emp-dept">${esc(e.dept)}</div>
           <div class="emp-role">${esc(e.role)}</div>
+          ${e.active === false ? '<div style="margin-top:4px"><span style="font-size:10px;font-weight:700;color:#fc8181;background:rgba(252,129,129,0.15);border:1px solid rgba(252,129,129,0.4);padding:2px 8px;border-radius:20px">⛔ موقوف</span></div>' : ''}
         </div>
       </div>
       <div class="emp-stats">
@@ -85,10 +86,12 @@ export function buildEmployees() {
         </div>
       </div>
       <div style="font-size:11px;color:var(--text-muted);margin:8px 0"><i class="fa fa-clock"></i> ${esc(checkInDisplay)} → ${esc(checkOutDisplay)}${e.remoteAttend ? ' · <span style="color:#68d391">📍 أي مكان</span>' : ''}${e.openHours ? ' · <span style="color:#63b3ed">🕐 مفتوح</span>' : ''}</div>
+      ${e.hireDate ? `<div style="font-size:11px;color:var(--text-muted);margin:0 0 8px"><i class="fa fa-user-clock"></i> تاريخ المباشرة: ${esc(String(e.hireDate).slice(0, 10))}</div>` : ''}
       <div style="margin-bottom:8px">${deviceBadges || '<span style="font-size:10px;color:var(--text-muted)">بدون أجهزة مسجّلة</span>'}</div>
       <div class="emp-actions">
         <button class="btn-sm btn-primary" onclick="viewEmp(${e.id})" title="تفاصيل"><i class="fa fa-eye"></i></button>
         ${canEdit ? `<button class="btn-sm btn-primary" onclick="editEmp(${e.id})" title="تعديل"><i class="fa fa-edit"></i></button>` : ''}
+        ${canEdit ? `<button class="btn-sm" style="background:${e.active === false ? 'linear-gradient(135deg,#276749,#2f855a)' : 'linear-gradient(135deg,#822727,#9b2c2c)'}" onclick="toggleEmployeeActive(${e.id})" title="${e.active === false ? 'تفعيل الحساب' : 'إيقاف الحساب'}"><i class="fa ${e.active === false ? 'fa-user-check' : 'fa-user-slash'}"></i></button>` : ''}
         <button class="btn-sm btn-primary" onclick="showEmployeeBarcodes(${e.id})" title="QR"><i class="fa fa-qrcode"></i></button>
         ${(typeof hasActionPermission !== 'function' || hasActionPermission('leaves','add')) ? `<button class="btn-sm" style="background:linear-gradient(135deg,#744210,#975a16)" onclick="openAddLeaveForm(${e.id})" title="إضافة إجازة"><i class="fa fa-calendar-alt"></i></button>` : ''}
         ${canDelete ? `<button class="btn-sm btn-danger" onclick="deleteEmp(${e.id})" title="حذف"><i class="fa fa-trash"></i></button>` : ''}

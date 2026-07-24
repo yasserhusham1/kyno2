@@ -1,25 +1,12 @@
 # KYNO — Netlify production (static SPA)
-# publish = dist فقط (~50 ملف) — أسرع من رفع المشروع كاملاً (180+ ملف)
+# نشر ثابت من جذر المشروع — لا build، لا functions، لا proxy.
+# الاتصال المباشر بـ Supabase عبر anon key (محمي بـ RLS).
 [build]
-  command = "node tools/build-netlify.js"
-  publish = "dist"
+  publish = "."
 
-# بدون Node: powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-netlify.ps1
-
-# SPA ثابت — لا حاجة لتحسين الأصول (يوفر دقائق Post-processing)
+# SPA ثابت — لا حاجة لتحسين الأصول
 [build.processing]
   skip_processing = true
-
-[functions]
-  directory = "netlify/functions"
-  node_bundler = "esbuild"
-
-# Backup route if frontend still uses /sb (legacy)
-[[redirects]]
-  from = "/sb/*"
-  to = "/.netlify/functions/supabase-proxy/:splat"
-  status = 200
-  force = true
 
 [[headers]]
   for = "/*"
@@ -30,7 +17,7 @@
     Referrer-Policy = "strict-origin-when-cross-origin"
     Permissions-Policy = "geolocation=(self), camera=(), microphone=(), payment=()"
     X-XSS-Protection = "0"
-    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://browser.sentry-cdn.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com; font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com data:; img-src 'self' data: blob: https:; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.ipify.org https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://browser.sentry-cdn.com https://*.ingest.sentry.io https://*.sentry.io; frame-src 'self' https://www.openstreetmap.org https://*.openstreetmap.org; object-src 'none'; base-uri 'self';"
+    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://browser.sentry-cdn.com; script-src-attr 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com; font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com data:; img-src 'self' data: blob: https:; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.ipify.org https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://browser.sentry-cdn.com https://*.ingest.sentry.io https://*.sentry.io; frame-src 'self' https://www.openstreetmap.org https://*.openstreetmap.org; object-src 'none'; base-uri 'self';"
 
 [[headers]]
   for = "/index.html"

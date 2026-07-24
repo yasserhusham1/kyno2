@@ -1,0 +1,38 @@
+# ─── Environment ───────────────────────────────────────
+.env.local
+.env.*.local
+.env.production
+
+# ─── Config (local only) ───────────────────────────────
+config/local.config.js
+
+# ─── Build Output ──────────────────────────────────────
+dist/
+release/
+build/
+
+# ─── Dependencies ──────────────────────────────────────
+node_modules/
+
+# ─── Supabase ──────────────────────────────────────────
+supabase/.temp/
+supabase/.branches/
+
+# ─── Logs ──────────────────────────────────────────────
+*.log
+logs/
+
+# ─── OS ────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Editor ────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
+# ─── Testing ───────────────────────────────────────────
+coverage/
+.nyc_output/

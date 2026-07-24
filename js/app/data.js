@@ -14,6 +14,19 @@ const DEFAULT_ATT_DATA = [];
 
 const LEGACY_STORAGE_KEY = 'attendance_system_data';
 
+const CLOUD_ONLY_STORAGE = true;
+
+if (typeof window !== 'undefined') {
+  window.__basmaCloudOnlyStorage = true;
+  try {
+    Object.keys(localStorage).forEach(function (key) {
+      if (/^(attendance_system_data|basma_registered_|basma_emp_session|basma_employee_company_id|basma_cloud_flush_|basma_tenant_)/i.test(key)) {
+        localStorage.removeItem(key);
+      }
+    });
+  } catch (e) { /* ignore */ }
+}
+
 
 
 function getActiveStorageCompanyId() {
@@ -35,14 +48,6 @@ function getActiveStorageCompanyId() {
     if (cid > 0) return cid;
 
   }
-
-  try {
-
-    var empCid = parseInt(localStorage.getItem('basma_employee_company_id') || '0', 10);
-
-    if (empCid > 0) return empCid;
-
-  } catch (e) { /* ignore */ }
 
   return null;
 
@@ -266,6 +271,15 @@ export function loadData(options) {
 
   options = options || {};
 
+  if (CLOUD_ONLY_STORAGE) {
+    window.employees = [];
+    window.attData = [];
+    window.leavesData = [];
+    window.nextEmpId = 1;
+    if (typeof syncWindowState === 'function') syncWindowState();
+    return;
+  }
+
   var cid = options.companyId != null ? parseInt(options.companyId, 10) : getActiveStorageCompanyId();
 
   if (cid && !options.skipLegacyMigrate) migrateLegacyStorageIfNeeded(cid, options);
@@ -330,6 +344,8 @@ export function loadData(options) {
       }
 
       if (!Array.isArray(appSettings.financeItems)) appSettings.financeItems = [];
+
+      if (!Array.isArray(appSettings.broadcastNotices)) appSettings.broadcastNotices = [];
 
       if (!Array.isArray(appSettings.activityLog)) appSettings.activityLog = [];
 
@@ -430,6 +446,21 @@ export function compactSuperAdminLocalStorage() {
 }
 
 export function saveData() {
+
+  if (CLOUD_ONLY_STORAGE) {
+    if (typeof syncWindowState === 'function') syncWindowState();
+    if (navigator && navigator.onLine === false) {
+      if (typeof window !== 'undefined' && window.BasmaToast && window.BasmaToast.warn) {
+        window.BasmaToast.warn('لا يوجد اتصال بالإنترنت — لم يتم حفظ البيانات. اتصل بالإنترنت ثم حاول مرة أخرى.');
+      }
+      return;
+    }
+    if (typeof scheduleAutoSupabaseSync === 'function') {
+      scheduleAutoSupabaseSync('saveData-cloud-only');
+    }
+    if (typeof updatePendingSyncBadge === 'function') updatePendingSyncBadge();
+    return;
+  }
 
   const STORAGE_KEY = tenantStorageKey();
 
@@ -536,6 +567,8 @@ export function switchTenantDataStore(companyId, options) {
 
     window.appSettings = resetAppSettings;
 
+    window.__basmaFinanceHydrated = false;
+
   }
 
 
@@ -604,6 +637,8 @@ export function isCompanyTenantFresh(companyId) {
 
   if (!cid) return false;
 
+  if (CLOUD_ONLY_STORAGE) return !!(window.__basmaFreshTenants && window.__basmaFreshTenants[cid]);
+
   try { return !!localStorage.getItem('basma_tenant_fresh_c_' + cid); } catch (e) { return false; }
 
 }
@@ -615,6 +650,13 @@ export function markCompanyTenantFresh(companyId) {
   var cid = parseInt(companyId, 10);
 
   if (!cid) return;
+
+  if (CLOUD_ONLY_STORAGE) {
+    window.__basmaFreshTenants = window.__basmaFreshTenants || {};
+    window.__basmaFreshTenants[cid] = Date.now();
+    wipeTenantStorage(cid);
+    return;
+  }
 
   try {
 
@@ -635,6 +677,11 @@ export function clearCompanyTenantFresh(companyId) {
   var cid = parseInt(companyId, 10);
 
   if (!cid) return;
+
+  if (CLOUD_ONLY_STORAGE) {
+    if (window.__basmaFreshTenants) delete window.__basmaFreshTenants[cid];
+    return;
+  }
 
   try { localStorage.removeItem('basma_tenant_fresh_c_' + cid); } catch (e) { /* ignore */ }
 
@@ -684,6 +731,8 @@ export function bootstrapZeroTenantStore(companyId, companyName) {
 
   window.appSettings.financeItems = [];
 
+  window.appSettings.broadcastNotices = [];
+
   window.appSettings.salaryDeletedMap = {};
 
   window.__basmaLocalSettingsAt = 0;
@@ -711,6 +760,17 @@ export function prepareCompanyTenantSession(user) {
   var cid = parseInt(user.company_id, 10);
 
   if (!cid) return false;
+
+  if (CLOUD_ONLY_STORAGE) {
+    switchTenantDataStore(cid, {
+      savePrevious: false,
+      resetSettings: true,
+      companyName: user.company_name || '',
+      skipLegacyMigrate: true
+    });
+    clearCompanyTenantFresh(cid);
+    return true;
+  }
 
   var tenantKey = tenantStorageKey(cid);
 

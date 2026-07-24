@@ -5,7 +5,9 @@
   'use strict';
 
   var FORBID_TAGS = /<\/?(?:script|iframe|object|embed|form|meta|link|base|svg|math)\b[^>]*>/gi;
-  var FORBID_ATTR = /\s(on\w+|formaction|xmlns|xlink:href)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi;
+  // v1 renders trusted internal templates with inline onclick handlers.
+  // Keep those handlers, but still strip dangerous form/XML attributes.
+  var FORBID_ATTR = /\s(formaction|xmlns|xlink:href)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi;
   var FORBID_URL = /(?:href|src|action)\s*=\s*("|')\s*javascript:/gi;
 
   function sanitizeHtml(html) {

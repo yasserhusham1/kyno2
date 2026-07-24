@@ -1,7 +1,7 @@
 # Apply SQL migration via Supabase Management API (no psql required)
 param(
   [Parameter(Mandatory = $true)][string]$SqlFile,
-  [string]$ProjectRef = 'qalcnvygyjtlmlauvzlk',
+  [string]$ProjectRef = 'gxiofbdykxjkdgdcmsnp',
   [string]$AccessToken = $env:SUPABASE_ACCESS_TOKEN
 )
 

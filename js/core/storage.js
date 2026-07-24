@@ -13,7 +13,13 @@
     /service.role/i,
     /password_hash/i,
     /^sb-[a-z0-9-]+-auth-token$/i,
-    /^basma_admin_session$/i
+    /^basma_admin_session$/i,
+    /^attendance_system_data/i,
+    /^basma_registered_/i,
+    /^basma_emp_session$/i,
+    /^basma_employee_company_id$/i,
+    /^basma_cloud_flush_/i,
+    /^basma_tenant_/i
   ];
 
   function isForbiddenKey(key) {

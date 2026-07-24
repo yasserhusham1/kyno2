@@ -24,7 +24,7 @@
 
     container.setAttribute('aria-live', 'polite');
 
-    container.style.cssText = 'position:fixed;bottom:20px;left:20px;right:20px;z-index:99999;display:flex;flex-direction:column;gap:8px;pointer-events:none;max-width:420px;margin:0 auto';
+    container.style.cssText = 'position:fixed;bottom:20px;left:20px;z-index:99999;display:flex;flex-direction:column;align-items:flex-start;gap:8px;pointer-events:none;max-width:min(92vw,420px);margin:0';
 
     document.body.appendChild(container);
 

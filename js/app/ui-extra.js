@@ -123,23 +123,16 @@ document.addEventListener('DOMContentLoaded', function() {
 
 // ======= SAFE STORAGE HELPERS =======
 function safeGetStorage(key, defaultVal) {
-  try {
-    const val = localStorage.getItem(key);
-    return val !== null ? val : defaultVal;
-  } catch(e) {
-    console.warn('localStorage read error:', e);
-    return defaultVal;
-  }
+  window.__basmaMemoryStorage = window.__basmaMemoryStorage || {};
+  return Object.prototype.hasOwnProperty.call(window.__basmaMemoryStorage, key)
+    ? window.__basmaMemoryStorage[key]
+    : defaultVal;
 }
 
 function safeSetStorage(key, val) {
-  try {
-    localStorage.setItem(key, val);
-    return true;
-  } catch(e) {
-    console.warn('localStorage write error:', e);
-    return false;
-  }
+  window.__basmaMemoryStorage = window.__basmaMemoryStorage || {};
+  window.__basmaMemoryStorage[key] = val;
+  return true;
 }
 
 // ======= GLOBAL ERROR HANDLER =======
@@ -329,13 +322,8 @@ function injectSubscriptionAlerts() {
 function _isPlatformAnnouncementDismissed(ann) {
   if (!ann || !ann.id) return false;
   var stamp = ann.updatedAt || ann.createdAt || '';
-  try {
-    var dismissed = sessionStorage.getItem('basma_platform_ann_dismiss_' + ann.id)
-      || localStorage.getItem('basma_platform_ann_dismiss_' + ann.id);
-    return dismissed === stamp;
-  } catch (e) {
-    return false;
-  }
+  window.__basmaDismissedAnnouncements = window.__basmaDismissedAnnouncements || {};
+  return window.__basmaDismissedAnnouncements[ann.id] === stamp;
 }
 
 function dismissPlatformAnnouncement(id) {
@@ -343,10 +331,8 @@ function dismissPlatformAnnouncement(id) {
   var ann = list.find(function (a) { return a && a.id === id; });
   if (!ann) return;
   var stamp = ann.updatedAt || ann.createdAt || String(Date.now());
-  try {
-    sessionStorage.setItem('basma_platform_ann_dismiss_' + id, stamp);
-    localStorage.setItem('basma_platform_ann_dismiss_' + id, stamp);
-  } catch (e) {}
+  window.__basmaDismissedAnnouncements = window.__basmaDismissedAnnouncements || {};
+  window.__basmaDismissedAnnouncements[id] = stamp;
   renderPlatformAnnouncementsRail();
   if (typeof updateNotifBadges === 'function') updateNotifBadges();
 }
@@ -354,6 +340,11 @@ function dismissPlatformAnnouncement(id) {
 function renderPlatformAnnouncementsRail() {
   var rail = document.getElementById('platform-announcements-rail');
   if (!rail) return;
+  if (typeof currentUser !== 'undefined' && currentUser === 'emp') {
+    rail.innerHTML = '';
+    rail.style.display = 'none';
+    return;
+  }
   if (!saasCurrentUser || saasCurrentUser.role === 'super_admin' || !saasCurrentUser.company_id) {
     rail.innerHTML = '';
     rail.style.display = 'none';
@@ -399,116 +390,10 @@ function injectPlatformAnnouncements() {
   });
 }
 
-function _employeeNotifStamp(notif) {
-  if (!notif) return '';
-  return String(notif.ts != null ? notif.ts : (notif.created_at || ''));
-}
-
-function _isEmployeeNotificationUnread(n) {
-  if (!n) return false;
-  if (n.unread !== undefined) return !!n.unread;
-  return !n.read;
-}
-
-function _isLeaveEmployeeNotification(n) {
-  return !!(n && (n.type === 'leave' || n.financeType === 'leave' || n.financeType === 'absence'));
-}
-
-function _isFinanceEmployeeNotification(n) {
-  return !!(n && n.financeType && ['deduction', 'bonus', 'loan'].indexOf(n.financeType) >= 0);
-}
-
-function _isEmployeeFinanceRailDismissed(notif) {
-  if (!notif || !notif.id) return true;
-  var stamp = _employeeNotifStamp(notif);
-  if (!stamp) return false;
-  try {
-    if (sessionStorage.getItem('basma_emp_fin_rail_' + notif.id) === stamp) return true;
-    if (localStorage.getItem('basma_emp_fin_rail_' + notif.id) === stamp) return true;
-  } catch (e) {}
-  return false;
-}
-
-function dismissEmployeeFinanceRailNotification(notifId) {
-  if (!notifId || typeof appSettings === 'undefined') return;
-  var list = appSettings.employeeNotifications || [];
-  var notif = list.find(function (n) { return n && n.id === notifId; });
-  if (!notif) return;
-  var stamp = _employeeNotifStamp(notif) || String(Date.now());
-  try {
-    sessionStorage.setItem('basma_emp_fin_rail_' + notifId, stamp);
-    localStorage.setItem('basma_emp_fin_rail_' + notifId, stamp);
-  } catch (e) {}
-  notif.read = true;
-  notif.unread = false;
-  if (typeof saveData === 'function') saveData();
-  if (typeof sb_markEmpNotifRead === 'function') {
-    sb_markEmpNotifRead(notif._remoteId || notif.id).catch(function (e) { console.warn('markEmpNotifRead:', e); });
-  }
-  if (typeof updateNotifBadges === 'function') updateNotifBadges();
-  if (typeof buildEmployeeLeaveNotifs === 'function' && window.loggedInEmpId) {
-    buildEmployeeLeaveNotifs(parseInt(window.loggedInEmpId, 10));
-  }
-  renderEmployeeFinanceNotificationsRail();
-}
-
-function renderEmployeeFinanceNotificationsRail() {
-  var rail = document.getElementById('employee-finance-notifications-rail');
-  if (!rail) return;
-  if (typeof currentUser === 'undefined' || currentUser !== 'emp' || !window.loggedInEmpId) {
-    rail.innerHTML = '';
-    rail.style.display = 'none';
-    return;
-  }
-  var empIdStr = String(parseInt(window.loggedInEmpId, 10));
-  var list = (typeof appSettings !== 'undefined' && appSettings.employeeNotifications) || [];
-  var visible = list.filter(function (n) {
-    if (!n || String(n.empId) !== empIdStr) return false;
-    if (!_isEmployeeNotificationUnread(n)) return false;
-    if (_isEmployeeFinanceRailDismissed(n)) return false;
-    return _isLeaveEmployeeNotification(n) || _isFinanceEmployeeNotification(n);
-  });
-  if (!visible.length) {
-    rail.innerHTML = '';
-    rail.style.display = 'none';
-    return;
-  }
-  rail.style.display = 'flex';
-  var esc = typeof BasmaSecurity !== 'undefined' ? BasmaSecurity.escapeHtml : function (s) { return String(s || ''); };
-  var labels = typeof NOTIF_FINANCE_LABELS !== 'undefined' ? NOTIF_FINANCE_LABELS : {};
-  var actionLabels = typeof NOTIF_ACTION_LABELS !== 'undefined' ? NOTIF_ACTION_LABELS : {};
-  rail.innerHTML = visible.slice(0, 5).map(function (n) {
-    var safeId = String(n.id).replace(/'/g, "\\'");
-    if (_isLeaveEmployeeNotification(n)) {
-      var leaveTitle = n.title || labels[n.financeType] || 'إشعار إجازة';
-      var leaveBody = n.body || n.note || '';
-      return '<div class="platform-ann-card finance-leave" data-fin-notif-id="' + esc(n.id) + '">' +
-        '<button type="button" class="platform-ann-close" onclick="dismissEmployeeFinanceRailNotification(\'' + safeId + '\')" aria-label="إغلاق">&times;</button>' +
-        '<div class="platform-ann-head"><i class="fa ' + esc(n.ico || 'fa-calendar-alt') + '"></i><span>' + esc(leaveTitle) + '</span></div>' +
-        '<div class="platform-ann-text">' + esc(leaveBody) + '</div>' +
-        '</div>';
-    }
-    var typeLabel = labels[n.financeType] || n.financeType || 'إشعار مالي';
-    var finText = typeof formatEmployeeFinanceNotificationBody === 'function'
-      ? formatEmployeeFinanceNotificationBody(n)
-      : { title: typeLabel, body: typeLabel };
-    var body = finText.body;
-    var finClass = n.financeType === 'bonus' ? 'finance-bonus' : (n.financeType === 'loan' ? 'finance-loan' : 'finance-deduction');
-    var icon = n.financeType === 'bonus' ? 'fa-gift' : (n.financeType === 'loan' ? 'fa-hand-holding-usd' : 'fa-minus-circle');
-    return '<div class="platform-ann-card ' + finClass + '" data-fin-notif-id="' + esc(n.id) + '">' +
-      '<button type="button" class="platform-ann-close" onclick="dismissEmployeeFinanceRailNotification(\'' + safeId + '\')" aria-label="إغلاق">&times;</button>' +
-      '<div class="platform-ann-head"><i class="fa ' + icon + '"></i><span>' + esc(finText.title || typeLabel) + '</span></div>' +
-      '<div class="platform-ann-text">' + esc(body) + '</div>' +
-      '</div>';
-  }).join('');
-}
-
 if (typeof window !== 'undefined') {
   window.renderPlatformAnnouncementsRail = renderPlatformAnnouncementsRail;
   window.dismissPlatformAnnouncement = dismissPlatformAnnouncement;
   window.injectPlatformAnnouncements = injectPlatformAnnouncements;
-  window.renderEmployeeFinanceNotificationsRail = renderEmployeeFinanceNotificationsRail;
-  window.dismissEmployeeFinanceRailNotification = dismissEmployeeFinanceRailNotification;
 }
 
 function getSubscriptionStatus() {
@@ -522,16 +407,17 @@ function setSubscriptionStatus(st) {
 }
 
 function resolveSubscriptionCompanyId() {
-  if (saasCurrentUser && saasCurrentUser.company_id != null) {
-    return parseInt(saasCurrentUser.company_id, 10) || null;
-  }
   if (typeof currentUser !== 'undefined' && currentUser === 'emp') {
+    var sess = window.__basmaEmpSession;
+    if (sess && sess.companyId != null) {
+      var sid = parseInt(sess.companyId, 10);
+      if (sid > 0) return sid;
+    }
     var emp = typeof getLoggedInEmp === 'function' ? getLoggedInEmp() : null;
     if (emp && emp.company_id != null) return parseInt(emp.company_id, 10) || null;
-    try {
-      var stored = parseInt(localStorage.getItem('basma_employee_company_id') || '0', 10);
-      if (stored > 0) return stored;
-    } catch (e) { /* ignore */ }
+  }
+  if (saasCurrentUser && saasCurrentUser.company_id != null) {
+    return parseInt(saasCurrentUser.company_id, 10) || null;
   }
   if (typeof getNotificationScopeId === 'function') {
     var scope = getNotificationScopeId();
@@ -545,6 +431,7 @@ async function refreshSubscriptionStatusForCurrentContext() {
   var cid = resolveSubscriptionCompanyId();
   if (!cid || typeof sb_checkSubscriptionStatus !== 'function') return null;
   var st = await sb_checkSubscriptionStatus(cid);
+  if (st && typeof st === 'object') st._companyId = cid;
   setSubscriptionStatus(st);
   if (typeof _renderSubscriptionBanner === 'function') _renderSubscriptionBanner();
   return st;
@@ -555,7 +442,12 @@ function isSubscriptionActive() {
     (typeof saasCurrentUser !== 'undefined' ? saasCurrentUser : null);
   if (u && u.role === 'super_admin') return true;
   var st = getSubscriptionStatus();
-  if (typeof currentUser !== 'undefined' && currentUser === 'emp' && !st) return true;
+  if (typeof currentUser !== 'undefined' && currentUser === 'emp') {
+    if (!st) return true;
+    if (st.unchecked === true) return true;
+    var cid = typeof resolveSubscriptionCompanyId === 'function' ? resolveSubscriptionCompanyId() : null;
+    if (st._companyId != null && cid && parseInt(st._companyId, 10) !== parseInt(cid, 10)) return true;
+  }
   // لا تحجب التنقل إذا لم تُحمَّل حالة الاشتراك بعد (تُفحص عند الدخول)
   if (!st && u && (u.role === 'company_admin' || u.role === 'company_user')) return true;
   return !!(st && st.valid === true);
@@ -3009,6 +2901,5 @@ if (typeof window !== 'undefined') {
   window.saVerifyBackupIntegrity = saVerifyBackupIntegrity;
   window.saRunBackupImport = saRunBackupImport;
   window.dismissPlatformAnnouncement = dismissPlatformAnnouncement;
-  window.dismissEmployeeFinanceRailNotification = dismissEmployeeFinanceRailNotification;
   installShowPageBridge();
 }

@@ -47,30 +47,6 @@
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
   }
 
-  function maybeFallbackFromProxy(response, url) {
-    if (!response || !url) return false;
-    var isProxyUrl = url.indexOf('/sb/') !== -1 || url.indexOf('/.netlify/functions/supabase-proxy') !== -1;
-    if (!isProxyUrl) return false;
-    if (response.status !== 404 && response.status !== 502) return false;
-    if (global.BasmaConfig && typeof BasmaConfig.markProxyUnavailable === 'function') {
-      BasmaConfig.markProxyUnavailable();
-    }
-    if (global.BasmaConfig && typeof BasmaConfig.isNetlifyHost === 'function' && BasmaConfig.isNetlifyHost()) {
-      _lastLoginError = 'proxy_not_deployed';
-      try {
-        console.warn('[KYNO] /sb proxy غير منشور (HTTP ' + response.status + '). نفّذ: netlify deploy --prod --dir=dist');
-      } catch (e) { /* ignore */ }
-      return false;
-    }
-    if (!global.BasmaConfig || typeof BasmaConfig.fallbackToDirectSupabase !== 'function') return false;
-    if (!BasmaConfig.fallbackToDirectSupabase()) return false;
-    if (typeof global.__basmaResetSupabaseClient === 'function') global.__basmaResetSupabaseClient();
-    try {
-      console.warn('[KYNO] /sb proxy unavailable (HTTP ' + response.status + ') — using direct Supabase URL');
-    } catch (e) { /* ignore */ }
-    return true;
-  }
-
   async function edgeFetch(name, options) {
     var url = edgeUrl(name);
     var key = anonKey();
@@ -84,9 +60,7 @@
       options.headers || {}
     );
     var timeoutMs = options.timeoutMs != null ? options.timeoutMs : 45000;
-    var onNetlifyProxy = url.indexOf('/.netlify/functions/supabase-proxy') !== -1 ||
-      url.indexOf('/sb/') !== -1;
-    var maxAttempts = options.retryNetwork === false ? 1 : (onNetlifyProxy ? 1 : 3);
+    var maxAttempts = options.retryNetwork === false ? 1 : 3;
     var lastErr = null;
 
     for (var attempt = 0; attempt < maxAttempts; attempt++) {
@@ -101,16 +75,6 @@
           signal: controller ? controller.signal : undefined
         });
         if (timer) clearTimeout(timer);
-        if (maybeFallbackFromProxy(res, url)) {
-          url = edgeUrl(name);
-          res = await fetch(url, {
-            method: options.method || 'GET',
-            headers: headers,
-            body: options.body,
-            credentials: 'include',
-            signal: controller ? controller.signal : undefined
-          });
-        }
         return res;
       } catch (err) {
         if (timer) clearTimeout(timer);
@@ -392,6 +356,7 @@
   function clearJwtContext() {
     _jwtCompanyId = undefined;
     _jwtRole = null;
+    _foreignSessionNotified = false;
   }
 
   async function applySupabaseAuthSession(tokens) {
@@ -544,6 +509,33 @@
     }
   }
 
+  /**
+   * حماية من تسرّب بيانات بين الشركات عند فتح شركتين في نفس المتصفح:
+   * كوكي الجلسة (HttpOnly) مشتركة على مستوى المتصفح/الدومين ولا يمكن أن تكون
+   * خاصة بتبويب واحد، فإذا سجّل المستخدم دخول شركة B في تبويب آخر، تصبح الكوكي
+   * تشير إلى B. عندما يحاول تبويب هذه الشركة A تجديد جلسته (JWT منتهي/فارغ في
+   * الذاكرة) فإنه يقرأ نفس الكوكي ويحصل على مستخدم B خطأً. هذا الفحص يمنع تبني
+   * جلسة مستخدم مختلف عن الهوية الحالية المعروضة في هذا التبويب.
+   */
+  function isForeignCookieSession(cookieUser) {
+    if (!cookieUser || cookieUser.id == null) return false;
+    if (typeof global.currentUser !== 'undefined' && global.currentUser !== 'admin') return false;
+    var active = global.saasCurrentUser || global._saasCurrentUser;
+    if (!active || active.id == null) return false; // لا هوية سابقة في هذا التبويب — استعادة أولية طبيعية
+    return String(active.id) !== String(cookieUser.id);
+  }
+
+  var _foreignSessionNotified = false;
+
+  function notifyForeignSessionConflict(cookieUser) {
+    global.__basmaForeignSessionConflict = { detectedAt: Date.now(), cookieUserId: cookieUser && cookieUser.id };
+    if (_foreignSessionNotified) return;
+    _foreignSessionNotified = true;
+    if (typeof global.handleForeignSessionConflict === 'function') {
+      try { global.handleForeignSessionConflict(cookieUser); } catch (e) { console.warn('handleForeignSessionConflict:', e); }
+    }
+  }
+
   var _restoreCookieInflight = null;
 
   async function restoreSessionViaCookieInner() {
@@ -555,6 +547,11 @@
         if (!res || !res.ok) continue;
         var json = await res.json();
         if (!json || !json.user) continue;
+        if (isForeignCookieSession(json.user)) {
+          // كوكي هذا المتصفح صارت تخصّ شركة/مستخدم آخر — لا نتبنّى جلسته في هذا التبويب
+          notifyForeignSessionConflict(json.user);
+          return null;
+        }
         var applied = await applyAuthPayload(json);
         if (!applied) continue;
         return json.user;

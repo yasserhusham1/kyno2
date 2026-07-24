@@ -32,33 +32,20 @@
 
   var config = Object.assign({}, defaults, supabaseDefaults, local);
   var directUrl = String(config.supabaseUrl || '').replace(/\/$/, '');
+  var loc = global.location;
   var runtime = { activeUrl: directUrl, usingProxy: false, proxyTried: false };
 
   if (/\.supabase\.co$/i.test(directUrl)) {
     config.supabaseDirectUrl = directUrl;
   }
 
-  // /sb proxy only when explicitly enabled OR hosted on Netlify (needs supabase-proxy function deployed once)
-  var loc = global.location;
-  var wantProxy = config.supabaseProxy === true;
-  if (!wantProxy && config.supabaseProxy !== false && loc && loc.protocol !== 'file:') {
-    var host = loc.hostname || '';
-    var isLocal = host === 'localhost' || host === '127.0.0.1' || host === '[::1]';
-    if (!isLocal && /\.netlify\.app$/i.test(host)) wantProxy = true;
-  }
-
-  if (wantProxy && config.supabaseDirectUrl && loc && loc.origin) {
-    // Direct function URL works on Git + API deploy; /sb/* redirect is optional backup
-    runtime.activeUrl = loc.origin.replace(/\/$/, '') + '/.netlify/functions/supabase-proxy';
-    runtime.usingProxy = true;
-    config.supabaseProxy = true;
-  } else {
-    runtime.activeUrl = directUrl;
-    config.supabaseProxy = false;
-  }
+  // الاتصال المباشر بـ Supabase دائماً — لا proxy.
+  runtime.activeUrl = directUrl;
+  runtime.usingProxy = false;
+  config.supabaseProxy = false;
 
   var hostedUrl = String(config.supabaseDirectUrl || runtime.activeUrl || '').replace(/\/$/, '');
-  if (/\.supabase\.co$/i.test(hostedUrl) || runtime.usingProxy) {
+  if (/\.supabase\.co$/i.test(hostedUrl)) {
     config.kynoRpcMode = true;
     config.kynoFinalLockdown = true;
   } else if (config.appEnv === 'production') {
@@ -75,21 +62,9 @@
     }
   }
 
-  function fallbackToDirectSupabase() {
-    if (!config.supabaseDirectUrl || runtime.proxyTried) return false;
-    runtime.proxyTried = true;
-    // On Netlify, direct *.supabase.co often fails (ERR_NAME_NOT_RESOLVED) — proxy function is required
-    if (isNetlifyHost()) return false;
-    runtime.activeUrl = config.supabaseDirectUrl;
-    runtime.usingProxy = false;
-    config.supabaseProxy = false;
-    return true;
-  }
-
-  function markProxyUnavailable() {
-    runtime.proxyTried = true;
-    runtime.proxyBroken = true;
-  }
+  // دوال توافقية — لم تعد تُستخدم (لا proxy) لكن تُبقى لتجنب كسر المراجع القديمة.
+  function fallbackToDirectSupabase() { return false; }
+  function markProxyUnavailable() { /* no-op */ }
 
   global.BasmaConfig = Object.freeze({
     get: function (key) { return config[key]; },

@@ -7,5 +7,6 @@
   "files.associations": {
     "supabase/functions/**/index.ts": "typescript"
   },
-  "snyk.advanced.autoSelectOrganization": true
+  "snyk.advanced.autoSelectOrganization": true,
+  "snyk.advanced.organization": "a3d368ee-d47f-4b34-b641-8d9da509a8d2"
 }

@@ -1,8 +1,8 @@
 // Deploy: supabase functions deploy auth-set-password
 /// <reference path="../env.d.ts" />
-import { COOKIE_NAME, corsHeaders, readCookie, sha256Hex, jsonResponse } from './_shared/session.ts';
-import { createServiceClient } from './_shared/supabase.ts';
-import { parseSaasUser } from './_shared/types.ts';
+import { COOKIE_NAME, corsHeaders, readCookie, sha256Hex, jsonResponse } from '../_shared/session.ts';
+import { createServiceClient } from '../_shared/supabase.ts';
+import { parseSaasUser } from '../_shared/types.ts';
 
 function canChangePassword(
   actor: { id: number; role: string; company_id: number | null },

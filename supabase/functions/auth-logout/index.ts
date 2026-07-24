@@ -9,8 +9,8 @@ import {
   jsonResponse,
   isSecureDeployment,
   requestIsCrossSite,
-} from './_shared/session.ts';
-import { createServiceClient } from './_shared/supabase.ts';
+} from '../_shared/session.ts';
+import { createServiceClient } from '../_shared/supabase.ts';
 
 type LogoutBody = {
   saas_user_id?: number;

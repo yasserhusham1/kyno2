@@ -22,6 +22,7 @@ async function pickEmployeeLoginAccount(candidates, title, subtitle) {
 }
 
 async function resolveEmployeeForLogin(ip, fp, ipRestrictOn) {
+  if (typeof restoreEmployeeDeviceSession === 'function') restoreEmployeeDeviceSession();
   var emp = findEmployeeByDevice(ip, fp);
   if (emp) {
     if (typeof refreshEmployeeClientProfileById === 'function') {
@@ -30,8 +31,11 @@ async function resolveEmployeeForLogin(ip, fp, ipRestrictOn) {
     if (typeof ensureEmployeeTenantContext === 'function') ensureEmployeeTenantContext(emp);
     return emp;
   }
-  var cachedId = parseInt(localStorage.getItem('basma_registered_emp') || '0', 10);
-  var cachedSlot = parseInt(localStorage.getItem('basma_registered_slot') || '0', 10) || 1;
+  var cached = typeof getCachedEmployeeSessionIds === 'function'
+    ? getCachedEmployeeSessionIds()
+    : { empId: 0, slot: 1, companyId: 0 };
+  var cachedId = cached.empId;
+  var cachedSlot = cached.slot;
   if (cachedId && ipRestrictOn && typeof sb_verifyEmployeeDeviceAccess === 'function') {
     var serverAccess = await sb_verifyEmployeeDeviceAccess(cachedId, { fingerprint: fp, slot: cachedSlot });
     if (serverAccess && serverAccess.ok === true) {
@@ -40,6 +44,17 @@ async function resolveEmployeeForLogin(ip, fp, ipRestrictOn) {
       } else if (typeof refreshEmployeeClientProfileById === 'function') {
         emp = await refreshEmployeeClientProfileById(cachedId, { slot: cachedSlot }) || null;
       }
+      if (emp) return emp;
+    }
+  }
+  if (ipRestrictOn && typeof resolveRegisteredEmployeeFromServer === 'function') {
+    emp = await resolveRegisteredEmployeeFromServer(fp, ipRestrictOn);
+    if (emp) return emp;
+  }
+  if (ipRestrictOn && fp && typeof tryAutoAdoptBrowserFingerprint === 'function') {
+    var adoptedResolve = await tryAutoAdoptBrowserFingerprint(fp, ip);
+    if (adoptedResolve && typeof resolveRegisteredEmployeeFromServer === 'function') {
+      emp = await resolveRegisteredEmployeeFromServer(fp, ipRestrictOn);
       if (emp) return emp;
     }
   }
@@ -79,10 +94,21 @@ async function refreshEmpLoginIp() {
   const st = document.getElementById('emp-login-status');
   const btn = document.getElementById('btn-emp-login');
   if (!ipEl) return;
+  if (typeof restoreEmployeeDeviceSession === 'function') restoreEmployeeDeviceSession();
+  if (typeof setSubscriptionStatus === 'function') setSubscriptionStatus(null);
+  else window._subscriptionStatus = null;
   ipEl.value = 'جارٍ الكشف...';
   if (st) st.textContent = 'يتم التحقق من الجهاز...';
   if (btn) btn.disabled = true;
-  currentClientIp = await fetchClientIp();
+  try {
+    var ipPromise = fetchClientIp();
+    currentClientIp = typeof withClientTimeout === 'function'
+      ? await withClientTimeout(ipPromise, 7000, 'employee_login_ip')
+      : await ipPromise;
+  } catch (e) {
+    console.warn('refreshEmpLoginIp ip:', e);
+    currentClientIp = '';
+  }
   const fp = getDeviceFingerprint();
   const ipDisplay = currentClientIp || 'غير متاح';
   ipEl.value = ipDisplay;
@@ -99,8 +125,11 @@ async function refreshEmpLoginIp() {
     return;
   }
   const emp = findEmployeeByDevice(currentClientIp, fp);
-  const cachedId = parseInt(localStorage.getItem('basma_registered_emp') || '0', 10);
-  const cachedSlot = parseInt(localStorage.getItem('basma_registered_slot') || '0', 10) || 1;
+  const cached = typeof getCachedEmployeeSessionIds === 'function'
+    ? getCachedEmployeeSessionIds()
+    : { empId: 0, slot: 1, companyId: 0 };
+  const cachedId = cached.empId;
+  const cachedSlot = cached.slot;
   const remoteEmps = (typeof employees !== 'undefined' ? employees : []).filter(function (e) { return e && e.remoteAttend; });
   if (!currentClientIp && !fp && !remoteEmps.length && !cachedId) {
     if (st) st.textContent = 'تعذّر كشف الجهاز';
@@ -110,18 +139,73 @@ async function refreshEmpLoginIp() {
     var nameSafe = typeof BasmaSecurity !== 'undefined' ? BasmaSecurity.escapeHtml(emp.name) : emp.name;
     if (st) st.innerHTML = '✅ جهاز مصرّح: <strong>' + nameSafe + '</strong>';
     if (btn) btn.disabled = false;
-  } else if (cachedId && typeof sb_verifyEmployeeDeviceAccess === 'function') {
+    return;
+  }
+  if (cachedId && typeof sb_verifyEmployeeDeviceAccess === 'function') {
     try {
-      var access = await sb_verifyEmployeeDeviceAccess(cachedId, { fingerprint: fp, slot: cachedSlot });
+      var verifyPromise = sb_verifyEmployeeDeviceAccess(cachedId, { fingerprint: fp, slot: cachedSlot });
+      var access = typeof withClientTimeout === 'function'
+        ? await withClientTimeout(verifyPromise, 12000, 'employee_login_verify')
+        : await verifyPromise;
       if (access && access.ok === true) {
         if (st) st.innerHTML = '✅ جهاز مسجّل — اضغط تسجيل الدخول';
         if (btn) btn.disabled = false;
         return;
       }
+      if (typeof tryAutoAdoptBrowserFingerprint === 'function') {
+        var adoptedVerify = await tryAutoAdoptBrowserFingerprint(fp, currentClientIp);
+        if (adoptedVerify) {
+          var verifyRetryPromise = sb_verifyEmployeeDeviceAccess(cachedId, { fingerprint: fp, slot: cachedSlot });
+          var accessRetry = typeof withClientTimeout === 'function'
+            ? await withClientTimeout(verifyRetryPromise, 12000, 'employee_login_verify_retry')
+            : await verifyRetryPromise;
+          if (accessRetry && accessRetry.ok === true) {
+            if (st) st.innerHTML = '✅ جهاز مسجّل — اضغط تسجيل الدخول';
+            if (btn) btn.disabled = false;
+            return;
+          }
+        }
+      }
     } catch (e) {
       console.warn('refreshEmpLoginIp verify:', e);
     }
-  } else if (remoteEmps.length === 1) {
+  }
+  if (ipRestrictOn && fp && typeof sb_resolveEmployeeByFingerprint === 'function') {
+    try {
+      var resolvePromise = sb_resolveEmployeeByFingerprint(fp);
+      var resolved = typeof withClientTimeout === 'function'
+        ? await withClientTimeout(resolvePromise, 12000, 'employee_login_resolve')
+        : await resolvePromise;
+      if ((!resolved || resolved.ok !== true) && typeof tryAutoAdoptBrowserFingerprint === 'function') {
+        var adoptedLogin = await tryAutoAdoptBrowserFingerprint(fp, currentClientIp);
+        if (adoptedLogin) {
+          resolvePromise = sb_resolveEmployeeByFingerprint(fp);
+          resolved = typeof withClientTimeout === 'function'
+            ? await withClientTimeout(resolvePromise, 12000, 'employee_login_resolve_retry')
+            : await resolvePromise;
+        }
+      }
+      if (resolved && resolved.ok === true && resolved.employee_id) {
+        markEmployeeSessionActive(resolved.employee_id, resolved.slot || 1, resolved.company_id);
+        if (st) st.innerHTML = '✅ جهاز مسجّل — اضغط تسجيل الدخول';
+        if (btn) btn.disabled = false;
+        return;
+      }
+      if (resolved && resolved.error === 'subscription_inactive') {
+        if (st) st.innerHTML = '⛔ اشتراك الشركة غير فعال — تواصل مع الإدارة';
+        if (btn) btn.disabled = true;
+        return;
+      }
+      if (resolved && (resolved.error === 'employee_suspended' || resolved.active === false)) {
+        if (st) st.innerHTML = '⛔ تم إيقاف الحساب — يرجى مراجعة الإدارة';
+        if (btn) btn.disabled = true;
+        return;
+      }
+    } catch (e) {
+      console.warn('refreshEmpLoginIp fingerprint resolve:', e);
+    }
+  }
+  if (remoteEmps.length === 1) {
     var remoteName = typeof BasmaSecurity !== 'undefined' ? BasmaSecurity.escapeHtml(remoteEmps[0].name) : remoteEmps[0].name;
     if (st) st.innerHTML = '✅ حضور عن بُعد: <strong>' + remoteName + '</strong>';
     if (btn) btn.disabled = false;
@@ -142,7 +226,10 @@ function switchLoginTab(type, el) {
   if (tabEl) tabEl.classList.add('active');
   document.getElementById('admin-form').style.display = type === 'admin' ? 'block' : 'none';
   document.getElementById('emp-form').style.display = type === 'emp' ? 'block' : 'none';
-  if (type === 'emp') refreshEmpLoginIp();
+  if (type === 'emp') {
+    if (typeof displayEmpLoginNotice === 'function') displayEmpLoginNotice();
+    refreshEmpLoginIp();
+  }
 }
 
 function _setLoginLoading(loading) {
@@ -271,14 +358,12 @@ function doLogin(role) {
             _showLoginError('خطأ في خادم الدخول — أعد المحاولة لاحقاً أو تواصل مع الدعم الفني.');
           } else if (loginErr === 'rate_limited') {
             _showLoginError('تم تجاوز عدد المحاولات، حاول لاحقاً.');
-          } else if (loginErr === 'proxy_not_deployed') {
-            _showLoginError('الموقع لا يتصل بـ Supabase — Function غير منشورة على Netlify.\n\n• من مجلد المشروع:\n  npm install -g netlify-cli\n  netlify login\n  netlify link\n  netlify deploy --prod --dir=dist\n\n• لا ترفع dist بالسحب فقط — يجب نشر supabase-proxy\n\n• تحقق: Netlify Dashboard → Functions → supabase-proxy');
           } else if (loginErr === 'network_error' || loginErr === 'edge_unreachable') {
             _showLoginError('تعذّر الاتصال بالخادم.\n\n• أعد تحميل الصفحة (Ctrl+Shift+R) بعد رفع آخر نسخة من dist/\n• على Netlify: تأكد من وجود ملف _redirects داخل dist\n• عطّل VPN أو AdBlock مؤقتاً\n• محلياً: غيّر DNS إلى 8.8.8.8 أو استخدم نشر Netlify');
           } else if (loginErr === 'bad_credentials') {
-            _showLoginError('اسم المستخدم أو كلمة المرور غير صحيحة.\n\n• استخدم حروفاً صغيرة في اسم المستخدم\n• بعد تحديث الأمان (migration 076) قد تكون كلمة المرور تغيّرت — أعد تعيينها من Supabase\n• اسم السوبر أدمن غالباً ليس superadmin بل yasser (تحقق من لوحة Supabase → saas_users)');
+            _showLoginError('اسم المستخدم أو كلمة المرور غير صحيحة.');
           } else {
-            _showLoginError('اسم المستخدم أو كلمة المرور غير صحيحة. استخدم حروفاً صغيرة، أو اطلب من المدير تعديل المستخدم وإعادة تعيين كلمة المرور.');
+            _showLoginError('اسم المستخدم أو كلمة المرور غير صحيحة.');
           }
           return;
         }
@@ -349,7 +434,8 @@ function doLogin(role) {
             syncOk = await syncFromSupabase({
               reason: 'post-login',
               keepDisableAutoSync: true,
-              forceRemote: !!window.__basmaTenantNeedsCloudReset
+              forceRemote: !!window.__basmaTenantNeedsCloudReset,
+              quick: true
             });
             window.__basmaTenantNeedsCloudReset = false;
           } catch (syncErr) {
@@ -396,10 +482,17 @@ function doLogin(role) {
     const ip = currentClientIp || await fetchClientIp();
     currentClientIp = ip;
     const fp = getDeviceFingerprint();
-    const cachedSlot = parseInt(localStorage.getItem('basma_registered_slot') || '0', 10) || 1;
+    const cached = typeof getCachedEmployeeSessionIds === 'function'
+      ? getCachedEmployeeSessionIds()
+      : { empId: 0, slot: 1, companyId: 0 };
+    const cachedSlot = cached.slot;
     await refreshEmployeesFromSupabaseForEmployeeClient('employee-login');
     const ipRestrictOn = appSettings.ipRestrict !== false;
     let emp = await resolveEmployeeForLogin(ip, fp, ipRestrictOn);
+    if (ipRestrictOn && !emp && typeof tryAutoAdoptBrowserFingerprint === 'function') {
+      var adoptedEmp = await tryAutoAdoptBrowserFingerprint(fp, ip);
+      if (adoptedEmp) emp = await resolveEmployeeForLogin(ip, fp, ipRestrictOn);
+    }
     if (ipRestrictOn && !emp) {
       var fpEsc = typeof BasmaSecurity !== 'undefined' ? BasmaSecurity.escapeHtml(fp) : fp;
       var ipEsc = ip && typeof BasmaSecurity !== 'undefined' ? BasmaSecurity.escapeHtml(ip) : ip;
@@ -414,21 +507,32 @@ function doLogin(role) {
         if (!dev.fingerprint && fp) dev.fingerprint = fp;
         dev.last_login = new Date().toISOString();
         dev.deviceInfo = getDeviceInfo();
-        markEmployeeSessionActive(emp.id, dev.slot);
+        markEmployeeSessionActive(emp.id, dev.slot, emp.company_id);
         saveData();
       } else if (emp.remoteAttend || !ipRestrictOn) {
-        markEmployeeSessionActive(emp.id, 1);
+        markEmployeeSessionActive(emp.id, 1, emp.company_id);
       }
     }
     if (!emp) {
       Swal.fire({ icon: 'error', title: 'تعذّر الدخول', text: 'لم يتم التعرف على الجهاز أو حساب الموظف.', ...swalTheme() });
       return;
     }
+    if (typeof sb_employeeLoginGate === 'function') {
+      try {
+        var loginGate = await sb_employeeLoginGate(emp.id);
+        if (loginGate && loginGate.active === false) {
+          emp.active = false;
+          Swal.fire({ icon: 'error', title: 'تم إيقاف الحساب', text: (loginGate.message || 'تم إيقاف حسابك، يرجى مراجعة الإدارة.'), ...swalTheme() });
+          return;
+        }
+        if (loginGate && loginGate.active === true) emp.active = true;
+      } catch (gateErr) {
+        console.warn('employee login gate:', gateErr);
+      }
+    }
     var empCid = emp.company_id != null ? parseInt(emp.company_id, 10) : null;
     if (!empCid) {
-      try {
-        empCid = parseInt(localStorage.getItem('basma_employee_company_id') || '0', 10) || null;
-      } catch (e) { empCid = null; }
+      empCid = null;
     }
     if (empCid && typeof sb_checkSubscriptionStatus === 'function') {
       try {
@@ -443,7 +547,7 @@ function doLogin(role) {
     window.loggedInEmpId = emp.id;
     currentUser = 'emp';
     var loginDev = emp.devices && emp.devices.find(function (d) { return d.fingerprint === fp; });
-    markEmployeeSessionActive(emp.id, loginDev ? loginDev.slot : 1);
+    markEmployeeSessionActive(emp.id, loginDev ? loginDev.slot : 1, emp.company_id);
     if (typeof refreshLoggedInEmployeeAttendance === 'function') {
       try { await refreshLoggedInEmployeeAttendance(); } catch (e) {
         console.warn('employee login attendance refresh:', e);
@@ -461,6 +565,9 @@ function doLogin(role) {
     }
     if (typeof syncWindowState === 'function') syncWindowState();
     logActivity('login', 'system', 'تسجيل دخول موظف: ' + (emp ? emp.name : ''), { targetName: emp ? emp.name : '', empId: emp ? emp.id : null, targetEmpId: emp ? emp.id : null });
+    if (typeof logEmployeePortalEvent === 'function') {
+      logEmployeePortalEvent('portal_login', { empId: emp.id, success: true, ip: currentClientIp });
+    }
     launchApp();
   })();
 }

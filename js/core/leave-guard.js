@@ -39,11 +39,7 @@
 
   function needsCloudFlush() {
     if (isEmployeePortal()) return false;
-    try {
-      var cid = typeof global.getActiveStorageCompanyId === 'function'
-        ? global.getActiveStorageCompanyId() : null;
-      return !!localStorage.getItem('basma_cloud_flush_c_' + (cid || '0'));
-    } catch (e) { return false; }
+    return false;
   }
 
   function shouldBlockLeave() {
@@ -55,8 +51,8 @@
   function getStatusMessage() {
     var count = getPendingCount();
     if (isOffline()) {
-      if (count > 0) return 'بدون اتصال — ' + count + ' تغيير محفوظ مؤقتاً';
-      return 'بدون اتصال — البيانات من السحابة عند العودة';
+      if (count > 0) return 'بدون اتصال — لا يمكن حفظ ' + count + ' تغيير حتى يعود الإنترنت';
+      return 'بدون اتصال — لا يمكن جلب البيانات من السحابة';
     }
     if (isSyncing()) return 'جارٍ رفع التغييرات للسحابة…';
     if (count > 0) return count + ' تغيير ينتظر الرفع — لا تغلق النافذة الآن';
@@ -73,11 +69,18 @@
     var offline = isOffline();
     var syncing = isSyncing();
     var active = offline || syncing || count > 0 || needsCloudFlush();
+    var isEmp = global.currentUser === 'emp';
+
+    if (offline && isEmp && count <= 0 && !syncing && !needsCloudFlush()) {
+      el.style.display = 'none';
+      el.classList.remove('is-synced', 'is-pending', 'is-syncing', 'is-offline');
+      return;
+    }
 
     el.classList.remove('is-synced', 'is-pending', 'is-syncing', 'is-offline');
     el.style.display = active ? '' : 'none';
 
-    if (offline && (count > 0 || needsCloudFlush())) {
+    if (offline && (count > 0 || syncing || needsCloudFlush())) {
       el.classList.add('is-offline');
       if (iconEl) iconEl.className = 'fa fa-wifi cloud-sync-status-icon';
       if (hintEl) hintEl.textContent = 'بدون نت';

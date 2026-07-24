@@ -29,37 +29,10 @@ export function buildAttendance() {
     deptFilter.value = currentVal;
   }
 
-  const fDept = document.getElementById('att-filter-dept')?.value || '';
-  const fPeriod = document.getElementById('att-filter-period')?.value || 'today';
-  const fStatus = document.getElementById('att-filter-status')?.value || '';
-  const fName =
-    typeof window.getEmployeeNameQuery === 'function'
-      ? window.getEmployeeNameQuery('att-filter-name')
-      : (document.getElementById('att-filter-name')?.value || '').trim().toLowerCase();
-
-  let filtered = [...attData];
-  if (fDept) filtered = filtered.filter((r) => r.dept === fDept);
-  if (fStatus) filtered = filtered.filter((r) => r.status === fStatus);
-  if (fName) {
-    filtered = filtered.filter((r) =>
-      typeof window.attendanceRecordMatchesNameQuery === 'function'
-        ? window.attendanceRecordMatchesNameQuery(r, fName, employees)
-        : String(r.emp || '').toLowerCase().includes(fName)
-    );
-  }
-
-  if (fPeriod === 'today') {
-    filtered = filtered.filter((r) => isTodayFn(r));
-  } else if (fPeriod === 'week') {
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - 6);
-    cutoff.setHours(0, 0, 0, 0);
-    filtered = filtered.filter((r) => {
-      const iso = r.dateIso || r.date_iso || '';
-      if (iso) return new Date(iso) >= cutoff;
-      return false;
-    });
-  }
+  let filtered =
+    typeof window.applyAttendanceFilters === 'function'
+      ? window.applyAttendanceFilters(attData)
+      : [...attData].filter((r) => isTodayFn(r));
 
   const statusMap = {
     طبيعي: 'badge-success',

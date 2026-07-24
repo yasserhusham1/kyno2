@@ -5,7 +5,7 @@
 #   powershell -File tools/apply-all-migrations.ps1
 
 param(
-  [string]$ProjectRef = $(if ($env:KYNO_SUPABASE_PROJECT_REF) { $env:KYNO_SUPABASE_PROJECT_REF } else { 'qalcnvygyjtlmlauvzlk' }),
+  [string]$ProjectRef = $(if ($env:KYNO_SUPABASE_PROJECT_REF) { $env:KYNO_SUPABASE_PROJECT_REF } else { 'gxiofbdykxjkdgdcmsnp' }),
   [string]$From = '000',
   [string]$To = '084'
 )

@@ -6,10 +6,15 @@
 <title>KYNO كينو | نظام إدارة الشركات والموارد البشرية</title>
 <link rel="icon" href="assets/kyno-logo.png" type="image/png">
 <link rel="apple-touch-icon" href="assets/kyno-logo.png">
-<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;900&family=Tajawal:wght@300;400;500;700;900&display=swap" rel="stylesheet">
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="dns-prefetch" href="https://cdn.jsdelivr.net">
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&family=Tajawal:wght@400;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/sweetalert2/11.10.1/sweetalert2.all.min.js"></script>
+<script src="js/utils/swal-a11y.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" crossorigin="anonymous"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -23,8 +28,8 @@ window.addEventListener('error', function(e) {
 }, true);
 </script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" onerror="console.warn('XLSX not available')"></script>
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://browser.sentry-cdn.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com; font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com data:; img-src 'self' data: blob: https:; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.ipify.org https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://browser.sentry-cdn.com https://*.ingest.sentry.io https://*.sentry.io; frame-src 'self' https://www.openstreetmap.org https://*.openstreetmap.org; object-src 'none'; base-uri 'self';">
-<link rel="stylesheet" href="css/app.css?v=20260619">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://browser.sentry-cdn.com; script-src-attr 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com; font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com data:; img-src 'self' data: blob: https:; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.ipify.org https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://browser.sentry-cdn.com https://*.ingest.sentry.io https://*.sentry.io; frame-src 'self' https://www.openstreetmap.org https://*.openstreetmap.org; object-src 'none'; base-uri 'self';">
+<link rel="stylesheet" href="css/app.css?v=20260720a">
 <!-- defaults ثم local (اختياري) ثم public -->
 <script src="config/supabase.defaults.js"></script>
 <script src="config/local.config.js"></script>
@@ -35,31 +40,28 @@ window.addEventListener('error', function(e) {
 <script src="js/core/sentry-init.js"></script>
 <script src="js/core/security.js"></script>
 <script src="js/core/safe-runtime.js"></script>
-<script src="js/core/html-sanitize.js"></script>
+<script src="js/core/html-sanitize.js?v=20260705"></script>
 <!-- KYNO modules (incremental — no rewrite) -->
 <script src="js/kyno/utils/retry-logic.js"></script>
-<script src="js/kyno/utils/performance.js"></script>
-<script src="js/kyno/utils/batch-processor.js"></script>
 <script src="js/kyno/security/sanitizer.js"></script>
-<script src="js/kyno/security/validation.js"></script>
-<script src="js/kyno/security/crypto.js"></script>
+<script src="js/kyno/security/validation.js?v=20260705"></script>
 <script src="js/kyno/security/rate-limiter.js"></script>
 <script src="js/kyno/core/logger.js"></script>
 <script src="js/kyno/core/error-handler.js"></script>
 <script src="js/kyno/core/offline-manager.js"></script>
 <script src="js/kyno/core/store.js"></script>
 <script src="js/kyno/api/supabase-client.js"></script>
-<script src="js/kyno/api/employee-api.js"></script>
 <script src="js/core/memory-auth-storage.js"></script>
 <script src="js/core/tenant-guard.js"></script>
 <script src="js/core/time-format.js"></script>
 <script src="js/analytics/chart-analytics.js"></script>
-<script src="js/core/cloud-sync.js"></script>
+<script src="js/core/cloud-sync.js?v=20260720d"></script>
+<script src="js/core/network-status.js?v=20260720d"></script>
 <script src="js/core/conflict-resolver.js"></script>
-<script src="js/core/leave-guard.js"></script>
+<script src="js/core/leave-guard.js?v=20260720d"></script>
 <script src="js/core/rpc-mode.js"></script>
 <script src="js/core/employee-autocomplete.js"></script>
-<script src="js/core/storage.js"></script>
+<script src="js/core/storage.js?v=20260709a"></script>
 <script src="js/core/session.js"></script>
 <script src="js/core/permissions.js?v=20260619"></script>
 <script src="js/core/permission-matrix.js"></script>
@@ -67,7 +69,7 @@ window.addEventListener('error', function(e) {
 <script src="js/utils/toast.js"></script>
 <script src="js/utils/loader.js"></script>
 <script src="js/utils/pdf.js"></script>
-<script src="js/services/auth-api.js?v=20260619"></script>
+<script src="js/services/auth-api.js?v=20260718a"></script>
 </head>
 <body>
 
@@ -184,6 +186,16 @@ window.addEventListener('error', function(e) {
         <span class="topbar-support-label">فريق الدعم</span>
       </button>
       <div class="topbar-clock" id="clock">--:-- --</div>
+      <div class="network-status-pill" id="topbar-network-status" data-network-status role="status" aria-live="polite">
+        <span class="network-status-dot" aria-hidden="true"></span>
+        <span class="network-status-text">
+          <span class="network-status-label">الشبكة</span>
+          <small class="network-status-detail"></small>
+        </span>
+        <button type="button" class="network-status-refresh" onclick="BasmaNetworkStatus.probe(true)" title="تحديث حالة الشبكة">
+          <i class="fa fa-sync-alt"></i>
+        </button>
+      </div>
       <div class="cloud-sync-status" id="cloud-sync-status" style="display:none" role="status" aria-live="polite">
         <i class="fa fa-cloud cloud-sync-status-icon"></i>
         <span class="cloud-sync-status-hint"></span>
@@ -205,6 +217,8 @@ window.addEventListener('error', function(e) {
     <div id="platform-announcements-rail" class="platform-announcements-rail" aria-live="polite"></div>
     <!-- Employee finance alerts (bonus / loan / deduction) -->
     <div id="employee-finance-notifications-rail" class="platform-announcements-rail employee-finance-rail" aria-live="polite"></div>
+    <!-- Employee broadcast notices (company-wide messages) -->
+    <div id="employee-broadcast-rail" class="platform-announcements-rail employee-broadcast-rail" aria-live="polite"></div>
 
     <!-- ===== SUPER ADMIN PAGES ===== -->
 
@@ -388,6 +402,8 @@ window.addEventListener('error', function(e) {
           <option value="غياب">غياب</option>
           <option value="إضافي">إضافي</option>
         </select>
+        <input type="date" class="filter-select" id="att-filter-from" title="من تاريخ" onchange="buildAttendance()">
+        <input type="date" class="filter-select" id="att-filter-to" title="إلى تاريخ" onchange="buildAttendance()">
         <button class="btn-add" data-perm="attendance.export" style="padding:10px 16px;font-size:13px" onclick="exportAttExcel()">
           <i class="fa fa-file-excel"></i> تصدير Excel
         </button>
@@ -456,6 +472,54 @@ window.addEventListener('error', function(e) {
               </tr>
             </thead>
             <tbody id="dev-mgmt-table"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card" id="att-device-track-card" style="margin-top:16px">
+        <div class="card-header">
+          <div class="card-title"><i class="fa fa-route"></i> تتبع دخول الموظفين والنشاط</div>
+          <button type="button" class="btn-add" data-perm="device_mgmt.view" style="padding:8px 14px;font-size:12px" onclick="refreshDeviceTrackingLog()">
+            <i class="fa fa-sync-alt"></i> تحديث السجل
+          </button>
+        </div>
+        <p class="settings-hint" style="padding:0 16px 8px;margin:0">يعرض: هل فتح الموظف الرابط، تسجيل الدخول، الحضور والانصراف، IP، الموقع، وعدد الزيارات — يتطلب تفعيل «تتبع الأجهزة» في الإعدادات.</p>
+        <div class="filter-bar" style="padding:0 16px 12px;margin:0;flex-wrap:wrap;gap:8px">
+          <input type="text" class="search-input" id="dev-track-search" placeholder="🔍 بحث: اسم موظف / IP / بصمة..." style="max-width:240px" oninput="debounceDeviceTrackingSearch()">
+          <select id="dev-track-event" class="search-input" style="max-width:160px" onchange="refreshDeviceTrackingLog()">
+            <option value="">كل الأحداث</option>
+            <option value="portal_visit">زيارة الرابط</option>
+            <option value="portal_login">تسجيل دخول</option>
+            <option value="check_in">حضور</option>
+            <option value="check_out">انصراف</option>
+            <option value="qr_link">ربط QR</option>
+            <option value="device_verify">تحقق جهاز</option>
+          </select>
+          <input type="date" id="dev-track-from" class="search-input" style="max-width:150px" onchange="refreshDeviceTrackingLog()">
+          <input type="date" id="dev-track-to" class="search-input" style="max-width:150px" onchange="refreshDeviceTrackingLog()">
+          <select id="dev-track-success" class="search-input" style="max-width:130px" onchange="refreshDeviceTrackingLog()">
+            <option value="">الكل</option>
+            <option value="1">ناجح فقط</option>
+            <option value="0">فاشل فقط</option>
+          </select>
+          <input type="number" class="search-input" id="dev-track-emp-id" placeholder="رقم موظف" style="max-width:110px" min="1" onchange="refreshDeviceTrackingLog()">
+        </div>
+        <div id="dev-track-summary" class="dev-track-summary" style="padding:0 16px 12px"></div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>الموظف</th>
+                <th>الحدث</th>
+                <th>التاريخ</th>
+                <th>اليوم</th>
+                <th>IP</th>
+                <th>البصمة</th>
+                <th>الموقع</th>
+                <th>الحالة</th>
+              </tr>
+            </thead>
+            <tbody id="dev-track-table"></tbody>
           </table>
         </div>
       </div>
@@ -580,6 +644,7 @@ window.addEventListener('error', function(e) {
           <div style="display:flex;gap:8px;flex-wrap:wrap">
             <button class="btn-add" data-perm="finance.add" style="padding:10px 16px;font-size:13px" onclick="openFinanceItemForm()"><i class="fa fa-plus"></i> إضافة حركة</button>
             <button class="btn-add" data-perm="finance.export" style="padding:10px 16px;font-size:13px;background:linear-gradient(135deg,#38a169,#276749)" onclick="exportFinanceReport()"><i class="fa fa-file-excel"></i> تقرير</button>
+            <button class="btn-add" data-perm="finance.export" style="padding:10px 16px;font-size:13px;background:linear-gradient(135deg,#2563a8,#1a3a5c)" onclick="printFinanceReport()"><i class="fa fa-print"></i> طباعة</button>
           </div>
         </div>
         <div class="filter-bar" style="margin:0 0 12px">
@@ -588,7 +653,7 @@ window.addEventListener('error', function(e) {
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>#</th><th>الموظف</th><th>النوع</th><th>المبلغ</th><th>الأقساط</th><th>الحالة</th><th>الملاحظات</th><th>إجراءات</th></tr></thead>
+            <thead><tr><th>#</th><th>الموظف</th><th>التاريخ</th><th>النوع</th><th>المبلغ</th><th>الأقساط</th><th>الحالة</th><th>الملاحظات</th><th>إجراءات</th></tr></thead>
             <tbody id="finance-table"></tbody>
           </table>
         </div>
@@ -727,6 +792,13 @@ window.addEventListener('error', function(e) {
               <button type="button" class="theme-btn" id="theme-btn-light" onclick="setTheme('light')"><i class="fa fa-sun"></i> فاتح</button>
             </div>
           </div>
+          <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border)">
+            <button type="button" class="btn-save" data-perm="settings.edit" onclick="openOfficialClosureForm()" style="background:linear-gradient(135deg,#805ad5,#553c9a)">
+              <i class="fa fa-ban"></i> تعطيل الرابط
+            </button>
+            <p class="settings-hint" style="margin-top:8px">تعطيل رسمي لروابط الموظفين مع تحديد هل أيام التعطيل براتب أو بدون راتب.</p>
+            <div id="official-closures-list" style="margin-top:10px"></div>
+          </div>
             </div>
           </div>
         </section>
@@ -768,6 +840,20 @@ window.addEventListener('error', function(e) {
         </section>
 
         <section class="settings-section">
+          <h2 class="settings-section-title"><i class="fa fa-bullhorn"></i> إشعارات الموظفين</h2>
+          <div class="settings-card-grid settings-card-grid-1">
+            <div class="card">
+              <div class="card-title settings-card-head"><i class="fa fa-bullhorn"></i> بثّ إشعار لجميع الموظفين</div>
+              <p class="settings-hint" style="margin-bottom:12px">أرسل رسالة تظهر لكل الموظفين في تطبيقهم مع زر إغلاق، ويمكن تكرارها تلقائياً حسب مدة زمنية تحددها.</p>
+              <button type="button" class="btn-save" data-perm="settings.edit" onclick="openBroadcastNoticeForm()" style="background:linear-gradient(135deg,#dd6b20,#c05621)">
+                <i class="fa fa-plus"></i> إشعار جديد
+              </button>
+              <div id="broadcast-notices-list" style="margin-top:14px"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="settings-section">
           <h2 class="settings-section-title"><i class="fa fa-map-marker-alt"></i> الموقع والحضور</h2>
           <div class="settings-card-grid settings-card-grid-1">
             <div class="card">
@@ -779,22 +865,26 @@ window.addEventListener('error', function(e) {
           </div>
           <div class="setting-group">
             <label class="setting-label">موقع الشركة (خط العرض)</label>
-            <input type="text" class="setting-input" id="set-gps-lat" oninput="previewGpsMap()">
+            <input type="text" class="setting-input" id="set-gps-lat" oninput="scheduleGpsMapPreview('manual')">
           </div>
           <div class="setting-group">
             <label class="setting-label">موقع الشركة (خط الطول)</label>
-            <input type="text" class="setting-input" id="set-gps-lng" oninput="previewGpsMap()">
+            <input type="text" class="setting-input" id="set-gps-lng" oninput="scheduleGpsMapPreview('manual')">
           </div>
           <div class="setting-group">
             <label class="setting-label">نطاق السماح (متر)</label>
-            <input type="number" class="setting-input" id="set-gps-range" min="10" max="5000" oninput="previewGpsMap()">
+            <input type="number" class="setting-input" id="set-gps-range" min="10" max="5000" oninput="scheduleGpsMapPreview('manual')">
           </div>
           <div class="gps-map" id="gps-map-preview">
-            <iframe id="gps-map-frame" loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe>
+            <div id="gps-leaflet-map" class="gps-leaflet-map"></div>
+            <iframe id="gps-map-frame" loading="lazy" referrerpolicy="no-referrer-when-downgrade" style="display:none"></iframe>
             <div class="gps-map-overlay">
               <span id="gps-map-label">موقع الشركة</span>
               <span id="gps-map-coords" dir="ltr"></span>
             </div>
+          </div>
+          <div class="gps-map-hint">
+            اكتب الإحداثيات يدوياً، أو اسحب المؤشر على الخريطة، أو استخدم زر «تحديد موقعي الحالي» ثم اضغط حفظ GPS.
           </div>
           <div class="gps-actions">
             <button type="button" class="gps-action-btn" onclick="useMyLocationForCompany()"><i class="fa fa-location-crosshairs"></i> تحديد موقعي الحالي</button>
@@ -898,17 +988,25 @@ window.addEventListener('error', function(e) {
 
         <div id="emp-work-mode-tags" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px"></div>
 
+        <div id="emp-closure-banner" style="display:none;margin-bottom:14px"></div>
+
         <div class="attendance-btns">
-          <button class="att-btn checkin" onclick="checkIn()">
-            <i class="fa fa-sign-in-alt"></i>
-            تسجيل الحضور
-            <small id="checkin-time">اضغط للتسجيل</small>
-          </button>
-          <button class="att-btn checkout" onclick="checkOut()">
-            <i class="fa fa-sign-out-alt"></i>
-            تسجيل الانصراف
-            <small id="checkout-time">اضغط للتسجيل</small>
-          </button>
+          <div class="att-btn checkin att-slide" id="att-slide-checkin" data-action="checkin" role="button" tabindex="0" aria-label="اسحب لتسجيل الحضور">
+            <div class="att-slide-fill"></div>
+            <div class="att-slide-track">
+              <span class="att-slide-text"><i class="fa fa-angles-left att-slide-arrow"></i> اسحب لتسجيل الحضور</span>
+              <small class="att-slide-time" id="checkin-time">اسحب للتسجيل</small>
+            </div>
+            <div class="att-slide-handle"><i class="fa fa-sign-in-alt"></i></div>
+          </div>
+          <div class="att-btn checkout att-slide" id="att-slide-checkout" data-action="checkout" role="button" tabindex="0" aria-label="اسحب لتسجيل الانصراف">
+            <div class="att-slide-fill"></div>
+            <div class="att-slide-track">
+              <span class="att-slide-text"><i class="fa fa-angles-left att-slide-arrow"></i> اسحب لتسجيل الانصراف</span>
+              <small class="att-slide-time" id="checkout-time">اسحب للتسجيل</small>
+            </div>
+            <div class="att-slide-handle"><i class="fa fa-sign-out-alt"></i></div>
+          </div>
         </div>
 
         <div class="daily-status-grid">
@@ -931,7 +1029,7 @@ window.addEventListener('error', function(e) {
         </div>
 
         <div class="card">
-          <div class="card-title" style="margin-bottom:16px"><i class="fa fa-calendar-week"></i> سجل هذا الأسبوع</div>
+          <div class="card-title" style="margin-bottom:16px"><i class="fa fa-calendar-week"></i> سجل الحضور الأخير</div>
           <div class="table-wrap">
             <table>
               <thead>
@@ -1078,16 +1176,16 @@ window.addEventListener('error', function(e) {
 
 <!-- Supabase SDK + tenant integration (JWT / RLS) — قبل سكربتات التطبيق -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" onerror="console.warn('مكتبة الاتصال لم تُحمّل')"></script>
-<script src="supabase_integration.js?v=20260619" onerror="console.warn('ملفات الاتصال غير متوفرة')"></script>
+<script src="supabase_integration.js?v=20260722k" onerror="console.warn('ملفات الاتصال غير متوفرة')"></script>
 <script src="js/kyno/integration.js"></script>
-<script src="js/app/state.js"></script>
-<script src="js/app/sync-state.js?v=20260619"></script>
+<script src="js/app/state.js?v=20260716f"></script>
+<script src="js/app/sync-state.js?v=20260722j"></script>
 <script src="js/core/dom.js"></script>
-<script type="module" src="js/app/entry.js"></script>
+<script type="module" src="js/app/entry.js?v=20260716f"></script>
 <script src="js/leaves/ui.js"></script>
-<script src="js/app/main.js?v=20260619"></script>
-<script src="js/auth/admin-session.js?v=20260619"></script>
-<script src="js/auth/login.js?v=20260619"></script>
+<script src="js/app/main.js?v=20260722m"></script>
+<script src="js/auth/admin-session.js?v=20260722j"></script>
+<script src="js/auth/login.js?v=20260722j"></script>
 
 <!-- BARCODE SCAN MODAL -->
 <div id="barcode-modal">
@@ -1114,8 +1212,9 @@ window.addEventListener('error', function(e) {
 </div>
 
 
-<script src="js/app/ui-extra.js?v=20260619"></script>
+<script src="js/app/ui-extra.js?v=20260705k"></script>
 <script src="js/app/ui-bindings.js?v=20260619"></script>
+<script src="js/attendance/slide-confirm.js?v=20260716e"></script>
 
 </body>
 </html>

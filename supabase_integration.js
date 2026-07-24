@@ -4,7 +4,7 @@
  * تسجيل الدخول: Edge auth-login + JWT (RLS 004)
  */
 
-var _LEGACY_SUPABASE_URL = 'https://qalcnvygyjtlmlauvzlk.supabase.co';
+var _LEGACY_SUPABASE_URL = 'https://gxiofbdykxjkdgdcmsnp.supabase.co';
 var _LEGACY_SUPABASE_ANON = '';
 
 function getSupabaseUrl() {
@@ -42,8 +42,8 @@ async function kynoWithRetry(fn, options) {
   return fn();
 }
 
-var EMPLOYEE_SELECT = 'id,name,dept,role,phone,salary,salary_type,salary_half,daily_rate,days,late_min,check_in,check_out,open_hours,remote_attend,include_overtime_in_salary,sal_status,sal_bonus,sal_deleted_period,avatar_url,company_id,created_at,employee_devices(id,slot,label,ip,fingerprint,pin,token,token_created_at,token_used_at,device_info,linked_at,last_login)';
-var ATTENDANCE_SELECT = 'id,employee_id,emp_name,dept,date_label,date_iso,check_in,check_out,hours,late,overtime,status,company_id,created_at';
+var EMPLOYEE_SELECT = 'id,name,dept,role,phone,salary,salary_type,salary_half,daily_rate,days,late_min,check_in,check_out,open_hours,remote_attend,include_overtime_in_salary,sal_status,sal_bonus,sal_deleted_period,avatar_url,hire_date,active,company_id,created_at,employee_devices(id,slot,label,ip,fingerprint,pin,token,token_created_at,token_used_at,device_info,linked_at,last_login)';
+var ATTENDANCE_SELECT = 'id,employee_id,emp_name,dept,date_label,date_iso,check_in,check_out,hours,late,overtime,status,admin_reason,company_id,created_at';
 
 var _sbClient = null;
 var _sbRealtimeChannel = null;
@@ -105,7 +105,7 @@ function mapEmployeeSaveRpcError(code, payload) {
     return 'الاشتراك غير فعال — فعّل الاشتراك من لوحة السوبر أدمن ثم أعد المحاولة.';
   }
   if (c === 'no_company_context' || c === 'tenant_mismatch') {
-    return 'سياق الشركة غير صحيح — سجّل الخروج ثم ادخل بحساب الشركة الصحيحة.';
+    return 'تعذّر حفظ الموظف — المعرّف مستخدم في شركة أخرى أو سياق الشركة غير متطابق. حدّث الصفحة أو سجّل الخروج ثم ادخل بحساب الشركة الصحيحة.';
   }
   if (c.indexOf('no_auth') >= 0 || c.indexOf('jwt') >= 0) {
     return 'انتهت جلسة الدخول — سجّل الدخول مرة أخرى.';
@@ -121,9 +121,21 @@ function sb_isPermanentEmployeeSaveError(msg) {
     || m.indexOf('tenant_mismatch') >= 0
     || m.indexOf('no_company_context') >= 0
     || m.indexOf('plan_feature_denied') >= 0
+    || m.indexOf('official_closure_active') >= 0
     || m.indexOf('تم الوصول') >= 0
     || m.indexOf('الاشتراك غير فعال') >= 0
     || m.indexOf('سياق الشركة') >= 0;
+}
+
+function sb_isPermanentAttendanceSyncError(code) {
+  var c = String(code || '').toLowerCase();
+  if (!c) return false;
+  return c === 'official_closure_active'
+    || c === 'device_not_authorized'
+    || c === 'subscription_inactive'
+    || c === 'employee_suspended'
+    || c === 'invalid_params'
+    || c === 'employee_not_found';
 }
 
 async function sb_countCompanyEmployees(companyId) {
@@ -146,10 +158,22 @@ async function sb_countCompanyEmployees(companyId) {
 function resolveActiveCompanyId(emp) {
   var user = typeof window !== 'undefined' ? window._saasCurrentUser || null : null;
   var id = null;
+  var jwtCid = null;
   if (typeof AuthApi !== 'undefined' && typeof AuthApi.getCompanyId === 'function') {
-    var jwtCid = AuthApi.getCompanyId();
-    if (jwtCid !== undefined && jwtCid !== null) id = jwtCid;
+    var rawJwtCid = AuthApi.getCompanyId();
+    if (rawJwtCid !== undefined && rawJwtCid !== null) jwtCid = parseInt(rawJwtCid, 10) || null;
   }
+  // حارس تسرّب بين الشركات: إن كانت هوية الشركة في JWT (هذا التبويب) تختلف عن
+  // هوية الشركة المعروضة في الواجهة (المسؤول الحالي)، فهذا يعني أن جلسة هذا
+  // التبويب تبنّت خطأً بيانات شركة أخرى (مثلاً كوكي مشتركة بعد تسجيل دخول في
+  // تبويب آخر). لا نُرجع أياً من القيمتين — نفشل بأمان بدل تسريب بيانات.
+  if (user && user.role !== 'super_admin' && user.company_id && jwtCid && parseInt(user.company_id, 10) !== jwtCid) {
+    if (typeof window !== 'undefined' && typeof window.handleForeignSessionConflict === 'function') {
+      window.handleForeignSessionConflict({ id: null, company_id: jwtCid, _reason: 'company_id_mismatch' });
+    }
+    return null;
+  }
+  if (jwtCid) id = jwtCid;
   if (!id && user && user.role !== 'super_admin' && user.company_id) id = user.company_id;
   if (!id && emp && emp.company_id) id = emp.company_id;
   if (!id && typeof window !== 'undefined' && typeof window.getActiveStorageCompanyId === 'function') {
@@ -276,6 +300,8 @@ function mapRpcEmployeeRow(data) {
     sal_status: data.sal_status,
     sal_bonus: data.sal_bonus,
     sal_deleted_period: data.sal_deleted_period,
+    hire_date: data.hire_date,
+    active: data.active,
     company_id: data.company_id
   };
 }
@@ -329,6 +355,8 @@ function applyRpcEmployeeSnapshot(emp, data, options) {
   if (data.sal_status != null) emp.salStatus = data.sal_status;
   if (data.sal_bonus != null) emp.salBonus = data.sal_bonus;
   if (data.sal_deleted_period != null) emp.salDeletedPeriod = data.sal_deleted_period;
+  if (data.hire_date !== undefined) emp.hireDate = data.hire_date ? String(data.hire_date).slice(0, 10) : '';
+  if (data.active !== undefined) emp.active = data.active !== false;
   if (data.company_id != null) emp.company_id = data.company_id;
   if (lockSalary && localSalary) {
     emp.salary = localSalary.salary;
@@ -744,7 +772,7 @@ async function sb_adminManageEmployeeDevice(employeeId, slot, options) {
     if (empRes.error || !empRes.data) return { ok: false, error: 'employee_not_found' };
     var updatePayload = clearLink
       ? { fingerprint: '', ip: '', linked_at: null, token_used_at: null, last_login: null, device_info: {} }
-      : { fingerprint: fp || '' };
+      : { fingerprint: fp || '', ip: '', linked_at: null, token_used_at: null, last_login: null, device_info: {} };
     var upd = await _sbClient.from('employee_devices')
       .update(updatePayload)
       .eq('employee_id', employeeId)
@@ -757,6 +785,33 @@ async function sb_adminManageEmployeeDevice(employeeId, slot, options) {
   } catch (e2) {
     console.error('sb_adminManageEmployeeDevice fallback:', e2);
     return { ok: false, error: e2.message || 'exception' };
+  }
+}
+
+async function sb_adminResetEmployeeDeviceRateLimit(employeeId, slot) {
+  employeeId = parseInt(employeeId, 10);
+  slot = parseInt(slot, 10);
+  if (!employeeId || (slot !== 1 && slot !== 2)) return { ok: false, error: 'invalid_params' };
+  if (!_sbClient && !(await ensureSupabaseClient())) return { ok: false, error: 'no_client' };
+  if (!(await ensureSbAuthForWrite())) return { ok: false, error: 'no_auth' };
+  try {
+    var rpc = await _sbClient.rpc('saas_admin_reset_employee_device_rate_limit', {
+      p_employee_id: employeeId,
+      p_slot: slot
+    });
+    if (rpc.error) {
+      console.error('sb_adminResetEmployeeDeviceRateLimit:', rpc.error);
+      return { ok: false, error: rpc.error.message || 'rpc_error' };
+    }
+    var payload = rpc.data;
+    if (typeof payload === 'string') {
+      try { payload = JSON.parse(payload); } catch (e) { payload = null; }
+    }
+    if (payload && payload.ok === true) return payload;
+    return { ok: false, error: (payload && payload.error) || 'reset_failed' };
+  } catch (e) {
+    console.error('sb_adminResetEmployeeDeviceRateLimit:', e);
+    return { ok: false, error: e.message || 'exception' };
   }
 }
 
@@ -792,18 +847,47 @@ async function sb_rpcUpsertEmployeeDevice(employeeId, slot, dev) {
   }
 }
 
+function _attendanceDateIsoForRpc(rec) {
+  if (!rec) return null;
+  if (typeof window.attendanceRecordIso === 'function') {
+    var fromMain = window.attendanceRecordIso(rec);
+    if (fromMain) return fromMain;
+  }
+  var iso = String(rec.dateIso || rec.date_iso || '').slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso;
+  var raw = String(rec.date || '').trim();
+  var m = raw.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+  if (m) return m[1] + '-' + String(m[2]).padStart(2, '0') + '-' + String(m[3]).padStart(2, '0');
+  return null;
+}
+
 async function sb_rpcDeleteAttendance(rec) {
   if (!_sbClient && !(await ensureSupabaseClient())) return false;
   if (!(await ensureSbAuthForWrite())) return false;
   try {
-    var dateIso = rec && (rec.dateIso || rec.date_iso) ? String(rec.dateIso || rec.date_iso).slice(0, 10) : null;
+    var empId = rec && rec.empId != null ? parseInt(rec.empId, 10) : null;
+    var attId = rec && rec.id != null ? parseInt(rec.id, 10) : null;
+    var dateIso = _attendanceDateIsoForRpc(rec);
+    if (!attId && (!empId || !dateIso)) {
+      console.warn('sb_rpcDeleteAttendance: missing id or employee/date', rec);
+      return false;
+    }
     var rpc = await _sbClient.rpc('saas_delete_attendance', {
-      p_employee_id: rec && rec.empId ? rec.empId : null,
+      p_employee_id: empId,
       p_date_iso: dateIso,
-      p_attendance_id: rec && rec.id ? rec.id : null
+      p_attendance_id: attId
     });
-    if (rpc.data && rpc.data.ok === true) return true;
-    if (rpc.data && rpc.data.error === 'attendance_not_found') return true;
+    if (rpc.error) {
+      console.error('sb_rpcDeleteAttendance rpc error:', rpc.error);
+      return false;
+    }
+    var payload = rpc.data;
+    if (typeof payload === 'string') {
+      try { payload = JSON.parse(payload); } catch (e) { payload = null; }
+    }
+    if (payload && payload.ok === true) return true;
+    if (payload && payload.error === 'attendance_not_found') return true;
+    console.warn('sb_rpcDeleteAttendance failed:', payload);
     return false;
   } catch (e) {
     console.error('sb_rpcDeleteAttendance:', e);
@@ -875,6 +959,8 @@ async function sb_rpcUpsertAttendanceAdmin(rec) {
       p_date_iso: rec.dateIso,
       p_check_in: rec.ci && rec.ci !== '—' ? rec.ci : null,
       p_check_out: rec.co && rec.co !== '—' ? rec.co : null,
+      p_clear_check_in: rec._clearCheckIn === true,
+      p_clear_check_out: rec._clearCheckOut === true,
       p_status: rec.status || null,
       p_reason: rec._adminReason || 'admin_upsert'
     });
@@ -928,39 +1014,10 @@ function initSupabase() {
 
 var _proxyProbed = false;
 
+// الاتصال المباشر بـ Supabase — لا proxy. دالة توافقية (no-op).
 async function probeSupabaseProxyOnce() {
-  if (_proxyProbed) return;
   _proxyProbed = true;
-  if (typeof window === 'undefined' || !window.BasmaConfig) return;
-  if (!BasmaConfig.isSupabaseProxied || !BasmaConfig.isSupabaseProxied()) return;
-  var key = getSupabaseAnonKey();
-  var base = BasmaConfig.supabaseUrl();
-  if (!key || !base) return;
-  try {
-    var res = await fetch(base.replace(/\/$/, '') + '/functions/v1/auth-session', {
-      headers: { apikey: key, Authorization: 'Bearer ' + key },
-      credentials: 'include'
-    });
-    if (res.status === 404 || res.status === 502) {
-      if (BasmaConfig.markProxyUnavailable) BasmaConfig.markProxyUnavailable();
-      if (BasmaConfig.isNetlifyHost && BasmaConfig.isNetlifyHost()) {
-        console.warn('[KYNO] supabase-proxy غير منشور على Netlify (HTTP ' + res.status + '). شغّل: netlify deploy --prod --dir=dist');
-        return;
-      }
-      if (BasmaConfig.fallbackToDirectSupabase()) {
-        console.warn('[KYNO] supabase-proxy غير منشور (HTTP ' + res.status + ') — الاتصال المباشر بـ Supabase');
-      }
-    }
-  } catch (e) {
-    if (BasmaConfig.isNetlifyHost && BasmaConfig.isNetlifyHost()) {
-      if (BasmaConfig.markProxyUnavailable) BasmaConfig.markProxyUnavailable();
-      console.warn('[KYNO] /sb غير متاح — نشر Netlify Function مطلوب');
-      return;
-    }
-    if (BasmaConfig.fallbackToDirectSupabase()) {
-      console.warn('[KYNO] /sb غير متاح — الاتصال المباشر بـ Supabase');
-    }
-  }
+  return;
 }
 
 if (typeof window !== 'undefined') {
@@ -1241,6 +1298,10 @@ function scheduleRealtimePull(reason) {
     if (_sbRealtimePulling) return;
     _sbRealtimePulling = true;
     try {
+      if (reason === 'attendance' && typeof syncAttendanceRealtimePull === 'function') {
+        await syncAttendanceRealtimePull({ reason: reason });
+        return;
+      }
       if (typeof sb_loadPlatformGlobals === 'function') {
         await sb_loadPlatformGlobals();
       }
@@ -1253,6 +1314,49 @@ function scheduleRealtimePull(reason) {
       _sbRealtimePulling = false;
     }
   }, 150);
+}
+
+async function syncAttendanceRealtimePull(options) {
+  options = options || {};
+  if (isSuperAdminSession()) return false;
+  if (!resolveActiveCompanyId()) return false;
+  if (typeof sb_getAttendance !== 'function') return false;
+  if (typeof AuthApi !== 'undefined' && AuthApi.refreshJwtContext) {
+    try { await AuthApi.refreshJwtContext(); } catch (e) { /* ignore */ }
+  }
+  var today = typeof todayIsoDate === 'function' ? todayIsoDate() : new Date().toISOString().slice(0, 10);
+  var fromIso = typeof addIsoDays === 'function' ? addIsoDays(today, -21) : (today.slice(0, 8) + '01');
+  var rows = await sb_getAttendance({ dateFrom: fromIso, dateTo: today, limit: 500 });
+  if (!rows) return false;
+  if (typeof mergeLocalPendingAttendance === 'function') {
+    rows = mergeLocalPendingAttendance(rows, window.employees || []);
+  } else if (typeof dedupeAttendanceRecords === 'function') {
+    rows = dedupeAttendanceRecords(rows);
+  }
+  var byKey = {};
+  (window.attData || []).forEach(function (r) {
+    if (!r) return;
+    var k = typeof attendanceRecordKey === 'function' ? attendanceRecordKey(r) : '';
+    if (k) byKey[k] = r;
+  });
+  rows.forEach(function (r) {
+    var k = typeof attendanceRecordKey === 'function' ? attendanceRecordKey(r) : '';
+    if (!k) return;
+    var prev = byKey[k];
+    var rank = typeof attendanceRecordRank === 'function' ? attendanceRecordRank : function () { return 0; };
+    if (!prev || rank(r) > rank(prev)) byKey[k] = r;
+  });
+  window.attData = Object.keys(byKey).map(function (k) { return byKey[k]; });
+  if (typeof normalizeAttendanceStore === 'function') normalizeAttendanceStore();
+  if (typeof syncAllAttendanceEmployeeNames === 'function') syncAllAttendanceEmployeeNames();
+  if (typeof saveData === 'function') saveData();
+  if (typeof buildAttendance === 'function') buildAttendance();
+  if (typeof buildDashboard === 'function') buildDashboard();
+  if (typeof buildSalaries === 'function' && document.getElementById('sal-table')) buildSalaries();
+  if (window.currentUser === 'emp' && typeof buildEmpPortal === 'function') {
+    buildEmpPortal({ skipSubscriptionRefresh: true });
+  }
+  return true;
 }
 
 async function setupSupabaseRealtime() {
@@ -1578,14 +1682,106 @@ function applyEmployeeClientProfile(emp, data) {
     emp._financeItemsLoaded = true;
     if (typeof clearSalaryCacheForEmployee === 'function') clearSalaryCacheForEmployee(emp.id);
   }
+  if (Array.isArray(data.broadcast_notices)) {
+    window.appSettings = window.appSettings || {};
+    window.appSettings.broadcastNotices = data.broadcast_notices.map(function (n) {
+      return Object.assign({}, n);
+    });
+    if (typeof window.renderEmployeeBroadcastRail === 'function') {
+      try { window.renderEmployeeBroadcastRail(); } catch (e) { /* ignore */ }
+    }
+  }
   if (typeof normalizeEmployee === 'function') normalizeEmployee(emp);
   return emp;
+}
+
+async function sb_adoptBrowserFingerprint(fingerprint, ip, options) {
+  options = options || {};
+  var fp = fingerprint != null ? String(fingerprint).trim() : '';
+  if (!fp) return { ok: false, error: 'invalid_fingerprint' };
+  if (!_sbClient && !(await ensureSupabaseClient())) return { ok: false, error: 'no_client' };
+  try {
+    var params = {
+      p_fingerprint: fp,
+      p_ip: ip || null
+    };
+    if (options.token) params.p_token = options.token;
+    if (options.employeeId) params.p_employee_id = options.employeeId;
+    if (options.slot) params.p_slot = options.slot;
+    var rpc = await _sbClient.rpc('saas_adopt_browser_fingerprint', params);
+    if (rpc.error) {
+      console.warn('sb_adoptBrowserFingerprint:', rpc.error);
+      return { ok: false, error: rpc.error.message || rpc.error.code || 'rpc_error' };
+    }
+    return rpc.data || { ok: false, error: 'empty_response' };
+  } catch (e) {
+    console.warn('sb_adoptBrowserFingerprint:', e);
+    return { ok: false, error: String(e && e.message || e) };
+  }
+}
+
+async function sb_resolveEmployeeByFingerprint(fingerprint) {
+  var fp = fingerprint != null ? String(fingerprint).trim() : '';
+  if (!fp) return null;
+  if (!_sbClient && !(await ensureSupabaseClient())) return null;
+  try {
+    var rpc = await _sbClient.rpc('saas_resolve_employee_by_fingerprint', { p_fingerprint: fp });
+    if (rpc.error) {
+      console.warn('sb_resolveEmployeeByFingerprint:', rpc.error);
+      return null;
+    }
+    var data = rpc.data;
+    if (!data || data.ok !== true || !data.employee_id) return data || null;
+    return data;
+  } catch (e) {
+    console.warn('sb_resolveEmployeeByFingerprint:', e);
+    return null;
+  }
 }
 
 async function sb_verifyEmployeeDeviceAccess(empId, options) {
   options = options || {};
   if (!empId) return null;
   return sb_fetchEmployeeClientProfile(empId, options);
+}
+
+// المرحلة 3 — بوابة حالة الحساب (تُستخدم عند الدخول/استعادة الجلسة/قبل الحضور)
+async function sb_employeeLoginGate(empId) {
+  var id = parseInt(empId, 10);
+  if (!id || id <= 0) return null;
+  if (!_sbClient && !(await ensureSupabaseClient())) return null;
+  try {
+    var rpc = await _sbClient.rpc('saas_employee_login_gate', { p_employee_id: id });
+    if (rpc.error) {
+      console.warn('sb_employeeLoginGate:', rpc.error);
+      return null;
+    }
+    return rpc.data || null;
+  } catch (e) {
+    console.warn('sb_employeeLoginGate:', e);
+    return null;
+  }
+}
+
+// المرحلة 3 — تفعيل/إيقاف حساب الموظف (مسؤول)
+async function sb_setEmployeeActive(empId, active) {
+  var id = parseInt(empId, 10);
+  if (!id || id <= 0) return { ok: false, error: 'invalid_params' };
+  if (!_sbClient && !(await ensureSupabaseClient())) return { ok: false, error: 'no_client' };
+  try {
+    var rpc = await _sbClient.rpc('saas_set_employee_active', {
+      p_employee_id: id,
+      p_active: active !== false
+    });
+    if (rpc.error) {
+      console.warn('sb_setEmployeeActive:', rpc.error);
+      return { ok: false, error: rpc.error.message || 'rpc_error' };
+    }
+    return rpc.data || { ok: false, error: 'no_data' };
+  } catch (e) {
+    console.warn('sb_setEmployeeActive:', e);
+    return { ok: false, error: String(e && e.message || e) };
+  }
 }
 
 function mapSalaryRecordFromDb(row) {
@@ -1595,7 +1791,7 @@ function mapSalaryRecordFromDb(row) {
   var bonus = parseInt(row.bonus, 10) || 0;
   var deduct = parseInt(row.total_deduct != null ? row.total_deduct : row.deductions, 10) || 0;
   var ot = parseInt(row.overtime_amount != null ? row.overtime_amount : row.overtime, 10) || 0;
-  var net = row.net_salary != null ? (parseInt(row.net_salary, 10) || 0) : Math.max(0, base + bonus + ot - deduct);
+  var net = row.net_salary != null ? (parseInt(row.net_salary, 10) || 0) : (base + bonus + ot - deduct);
   var monthIso = row.month_iso || '';
   var monthDisplay = row.month_label || '—';
   if (monthIso) {
@@ -1638,12 +1834,14 @@ async function sb_fetchEmployeeAttendance(empId, options) {
     }
   }
   try {
-    var rpc = await _sbClient.rpc('saas_fetch_employee_attendance', {
+    var rpcParams = {
       p_employee_id: empId,
       p_fingerprint: fp || null,
       p_token: token || null,
-      p_limit: options.limit != null ? options.limit : 120
-    });
+      p_limit: options.limit != null ? options.limit : 500
+    };
+    if (options.offset != null) rpcParams.p_offset = options.offset;
+    var rpc = await _sbClient.rpc('saas_fetch_employee_attendance', rpcParams);
     if (rpc.error) {
       console.warn('sb_fetchEmployeeAttendance:', rpc.error);
       return null;
@@ -1655,6 +1853,53 @@ async function sb_fetchEmployeeAttendance(empId, options) {
     console.warn('sb_fetchEmployeeAttendance:', e);
     return null;
   }
+}
+
+async function sb_fetchAllAttendance(filters) {
+  filters = filters || {};
+  var pageSize = filters.limit || 500;
+  var offset = filters.offset || 0;
+  var all = [];
+  var total = null;
+  var guard = 0;
+  while (guard < 500) {
+    guard++;
+    if (!_sbClient && !(await ensureSupabaseClient())) return null;
+    if (!(await ensureSbAuthForRead())) return null;
+    try {
+      var rpc = await _sbClient.rpc('saas_list_attendance', {
+        p_limit: pageSize,
+        p_offset: offset,
+        p_employee_id: filters.employeeId || null,
+        p_date_from: filters.dateFrom || null,
+        p_date_to: filters.dateTo || null
+      });
+      if (rpc.error) {
+        console.error('sb_fetchAllAttendance:', rpc.error);
+        return offset === 0 ? null : all;
+      }
+      var payload = rpc.data;
+      if (typeof payload === 'string') {
+        try { payload = JSON.parse(payload); } catch (e) { payload = null; }
+      }
+      if (!payload || payload.ok !== true || !Array.isArray(payload.data)) {
+        return offset === 0 ? null : all;
+      }
+      if (total == null && payload.total != null) total = parseInt(payload.total, 10);
+      var rows = payload.data;
+      if (filters.status) {
+        rows = rows.filter(function (r) { return r.status === filters.status; });
+      }
+      all = all.concat(rows.map(mapAttFromDb));
+      if (!payload.data.length || payload.data.length < pageSize) break;
+      offset += payload.data.length;
+      if (total != null && all.length >= total) break;
+    } catch (e) {
+      console.error('sb_fetchAllAttendance:', e);
+      return offset === 0 ? null : all;
+    }
+  }
+  return all;
 }
 
 async function sb_fetchEmployeeClientProfile(empId, options) {
@@ -1826,7 +2071,7 @@ async function sb_lookupDeviceRegistration(parsed) {
 }
 
 async function sb_linkDeviceByToken(token, fingerprint, ip, deviceInfo, empId, slot) {
-  if (!_sbClient && !(await ensureSupabaseClient())) return null;
+  if (!_sbClient && !(await ensureSupabaseClient())) return { ok: false, error: 'no_client' };
   try {
     var params = {
       p_fingerprint: fingerprint,
@@ -1839,12 +2084,12 @@ async function sb_linkDeviceByToken(token, fingerprint, ip, deviceInfo, empId, s
     var res = await _sbClient.rpc('saas_link_device_by_token', params);
     if (res.error) {
       console.warn('sb_linkDeviceByToken:', res.error);
-      return null;
+      return { ok: false, error: res.error.message || res.error.code || 'rpc_error', code: res.error.code || '', details: res.error.details || '' };
     }
-    return res.data || null;
+    return res.data || { ok: false, error: 'empty_response' };
   } catch (e) {
     console.warn('sb_linkDeviceByToken:', e);
-    return null;
+    return { ok: false, error: e.message || String(e) || 'exception' };
   }
 }
 
@@ -1964,9 +2209,133 @@ function getDeviceFingerprintForRpc() {
   return '';
 }
 
+function isRpcMissingFunctionError(err) {
+  if (!err) return false;
+  var code = String(err.code || '');
+  var msg = String(err.message || '').toLowerCase();
+  return code === 'PGRST202' || msg.indexOf('could not find the function') >= 0;
+}
+
+function normalizeDeviceAttendanceRpcData(data) {
+  if (!data) return { ok: false, error: 'rpc_error', detail: 'empty_response' };
+  if (data.ok === false) {
+    return { ok: false, error: data.error || 'rpc_error', detail: data.detail || '' };
+  }
+  var attId = data.attendance_id || data.id || null;
+  if (data.ok === true && data.stats_only === true && !attId) {
+    return { ok: false, error: 'stats_only', detail: 'stats_only_without_attendance' };
+  }
+  if (data.ok === true || attId) {
+    return {
+      ok: true,
+      id: attId,
+      employee_id: data.employee_id,
+      check_in: data.check_in,
+      check_out: data.check_out,
+      date_iso: data.date_iso,
+      date_label: data.date_label,
+      hours: data.hours,
+      late: data.late,
+      overtime: data.overtime,
+      status: data.status,
+      server_authoritative: data.server_authoritative === true || !!(data.check_in || data.check_out)
+    };
+  }
+  return { ok: false, error: data.error || 'rpc_error', detail: data.detail || JSON.stringify(data) };
+}
+
+async function sb_rpcAttendanceDeviceAttempt(fnName, params) {
+  var rpc = await _sbClient.rpc(fnName, params);
+  if (rpc.error) {
+    var errMsg = rpc.error.message || rpc.error.code || 'rpc_error';
+    var errDetail = [rpc.error.details, rpc.error.hint, rpc.error.message].filter(Boolean).join(' | ');
+    return {
+      ok: false,
+      transportError: true,
+      missingFunction: isRpcMissingFunctionError(rpc.error),
+      error: errMsg,
+      detail: errDetail || ''
+    };
+  }
+  return normalizeDeviceAttendanceRpcData(rpc.data);
+}
+
+function buildDeviceAttendanceRpcAttempts(rec, emp, fp, punchType) {
+  var dateIso = rec.dateIso || (typeof todayIsoDate === 'function' ? todayIsoDate() : new Date().toISOString().slice(0, 10));
+  var dateLabel = rec.date || dateIso;
+  var empName = rec.emp || (emp && emp.name) || null;
+  var dept = rec.dept || (emp && emp.dept) || null;
+  var days = emp && emp.days != null ? emp.days : null;
+  var lateMin = emp && emp.lateMin != null ? emp.lateMin : null;
+  var ci = rec.ci && rec.ci !== '—' ? rec.ci : null;
+  var co = rec.co && rec.co !== '—' ? rec.co : null;
+  var attempts = [];
+
+  if (punchType === 'check_in' || punchType === 'check_out') {
+    attempts.push({
+      fn: 'saas_upsert_attendance_by_device',
+      params: {
+        p_employee_id: rec.empId,
+        p_fingerprint: fp || null,
+        p_punch_type: punchType,
+        p_emp_name: empName,
+        p_dept: dept
+      }
+    });
+    attempts.push({
+      fn: 'saas_upsert_attendance_employee',
+      params: {
+        p_employee_id: rec.empId,
+        p_fingerprint: fp || null,
+        p_punch_type: punchType,
+        p_emp_name: empName,
+        p_dept: dept
+      }
+    });
+    attempts.push({
+      fn: 'saas_upsert_attendance_by_device',
+      params: {
+        p_employee_id: rec.empId,
+        p_fingerprint: fp || null,
+        p_date_iso: dateIso,
+        p_date_label: dateLabel,
+        p_check_in: punchType === 'check_in' ? ci : ci,
+        p_check_out: punchType === 'check_out' ? co : null,
+        p_status: rec.status || 'طبيعي',
+        p_emp_name: empName,
+        p_dept: dept,
+        p_days: days,
+        p_late_min: lateMin,
+        p_punch_type: punchType
+      }
+    });
+  } else {
+    attempts.push({
+      fn: 'saas_upsert_attendance_by_device',
+      params: {
+        p_employee_id: rec.empId,
+        p_fingerprint: fp || null,
+        p_date_iso: dateIso,
+        p_date_label: dateLabel,
+        p_check_in: ci,
+        p_check_out: co,
+        p_hours: rec.hrs && rec.hrs !== '—' ? rec.hrs : null,
+        p_late: rec.late && rec.late !== '—' ? rec.late : null,
+        p_overtime: rec.ot && rec.ot !== '—' ? rec.ot : null,
+        p_status: rec.status || 'طبيعي',
+        p_emp_name: empName,
+        p_dept: dept,
+        p_days: days,
+        p_late_min: lateMin
+      }
+    });
+  }
+  return attempts;
+}
+
 async function sb_upsertAttendanceFromDevice(rec) {
-  if (!rec || !rec.empId) return null;
-  if (!_sbClient && !(await ensureSupabaseClient())) return null;
+  if (!rec || !rec.empId) return { ok: false, error: 'invalid_params' };
+  if (!_sbClient && !(await ensureSupabaseClient())) return { ok: false, error: 'cloud_unavailable' };
   var fp = getDeviceFingerprintForRpc();
   var emp = (window.employees || []).find(function (e) { return e && e.id === rec.empId; });
   var punchType = rec._punchType || null;
@@ -1990,61 +2359,89 @@ async function sb_upsertAttendanceFromDevice(rec) {
         server_authoritative: true
       };
     }
-    var rpcParams = {
-      p_employee_id: rec.empId,
-      p_fingerprint: fp || null,
-      p_punch_type: punchType
-    };
-    if (useServerPunch) {
-      rpcParams.p_emp_name = rec.emp || (emp && emp.name) || null;
-      rpcParams.p_dept = rec.dept || (emp && emp.dept) || null;
-      if (!kynoUseRpcWrites()) {
-        rpcParams.p_days = emp && emp.days != null ? emp.days : null;
-        rpcParams.p_late_min = emp && emp.lateMin != null ? emp.lateMin : null;
+
+    var attempts = buildDeviceAttendanceRpcAttempts(rec, emp, fp, punchType);
+    var lastErr = { ok: false, error: 'rpc_error', detail: 'no_attempt' };
+    for (var i = 0; i < attempts.length; i++) {
+      var attempt = attempts[i];
+      var result = await sb_rpcAttendanceDeviceAttempt(attempt.fn, attempt.params);
+      if (result.ok === true && result.id) return result;
+      lastErr = result;
+      if (result.transportError && result.missingFunction) continue;
+      if (result.error === 'stats_only') continue;
+      if (result.error === 'device_not_authorized' || result.error === 'official_closure_active' ||
+          result.error === 'subscription_inactive' || result.error === 'employee_suspended' ||
+          result.error === 'invalid_params') {
+        return result;
       }
-    } else {
-      rpcParams.p_date_iso = rec.dateIso || null;
-      rpcParams.p_date_label = rec.date || rec.dateIso || '';
-      rpcParams.p_check_in = rec.ci && rec.ci !== '—' ? rec.ci : null;
-      rpcParams.p_check_out = rec.co && rec.co !== '—' ? rec.co : null;
-      rpcParams.p_hours = rec.hrs && rec.hrs !== '—' ? rec.hrs : null;
-      rpcParams.p_late = rec.late && rec.late !== '—' ? rec.late : null;
-      rpcParams.p_overtime = rec.ot && rec.ot !== '—' ? rec.ot : null;
-      rpcParams.p_status = rec.status || 'طبيعي';
-      rpcParams.p_emp_name = rec.emp || (emp && emp.name) || null;
-      rpcParams.p_dept = rec.dept || (emp && emp.dept) || null;
-      rpcParams.p_days = emp && emp.days != null ? emp.days : null;
-      rpcParams.p_late_min = emp && emp.lateMin != null ? emp.lateMin : null;
     }
-    var rpcName = (kynoUseRpcWrites() && useServerPunch)
-      ? 'saas_upsert_attendance_employee'
-      : 'saas_upsert_attendance_by_device';
-    var rpc = await _sbClient.rpc(rpcName, rpcParams);
-    if (rpc.error) {
-      console.warn('sb_upsertAttendanceFromDevice:', rpc.error);
-      return null;
-    }
-    var d = rpc.data;
-    if (!d || d.ok !== true) {
-      console.warn('sb_upsertAttendanceFromDevice:', d && d.error, d && d.detail);
-      return { ok: false, error: d && d.error, detail: d && d.detail };
-    }
-    return {
-      ok: true,
-      id: d.attendance_id,
-      employee_id: d.employee_id,
-      check_in: d.check_in,
-      check_out: d.check_out,
-      date_iso: d.date_iso,
-      date_label: d.date_label,
-      hours: d.hours,
-      late: d.late,
-      overtime: d.overtime,
-      status: d.status,
-      server_authoritative: d.server_authoritative === true
-    };
+    console.warn('sb_upsertAttendanceFromDevice failed:', lastErr);
+    return lastErr;
   } catch (e) {
     console.warn('sb_upsertAttendanceFromDevice:', e);
+    return { ok: false, error: e.message || 'cloud_unavailable' };
+  }
+}
+
+async function sb_saveOfficialClosuresJson(closures) {
+  if (!_sbClient && !(await ensureSupabaseClient())) return false;
+  if (!(await ensureSbAuthForWrite())) return false;
+  var list = typeof normalizeOfficialClosures === 'function'
+    ? normalizeOfficialClosures(closures || [])
+    : (closures || []);
+  var payload = { official_closures_json: JSON.stringify(list) };
+  return sb_saveSettings(payload);
+}
+
+async function sb_verifyOfficialClosuresJson(expectedCount) {
+  if (typeof sb_fetchTenantSettingKeys !== 'function') return false;
+  try {
+    var remote = await sb_fetchTenantSettingKeys(['official_closures_json']);
+    if (!remote || remote.official_closures_json == null) return false;
+    var parsed = JSON.parse(remote.official_closures_json || '[]') || [];
+    var normalized = typeof normalizeOfficialClosures === 'function'
+      ? normalizeOfficialClosures(parsed)
+      : parsed;
+    return normalized.length === (expectedCount || 0);
+  } catch (e) {
+    return false;
+  }
+}
+
+async function sb_getOfficialClosuresJsonForEmployee(empId) {
+  if (!empId) return null;
+  if (!_sbClient && !(await ensureSupabaseClient())) return null;
+  try {
+    var rpc = await _sbClient.rpc('saas_get_official_closures_json_for_employee', {
+      p_employee_id: empId
+    });
+    if (rpc.error) {
+      console.warn('sb_getOfficialClosuresJsonForEmployee:', rpc.error);
+      return null;
+    }
+    return rpc.data || null;
+  } catch (e) {
+    console.warn('sb_getOfficialClosuresJsonForEmployee:', e);
+    return null;
+  }
+}
+
+async function sb_getActiveOfficialClosureForEmployee(empId) {
+  if (!empId) return null;
+  if (!_sbClient && !(await ensureSupabaseClient())) return null;
+  var fp = getDeviceFingerprintForRpc();
+  try {
+    var rpc = await _sbClient.rpc('saas_get_active_official_closure_for_employee', {
+      p_employee_id: empId,
+      p_fingerprint: fp || null
+    });
+    if (rpc.error) {
+      console.warn('sb_getActiveOfficialClosureForEmployee:', rpc.error);
+      return null;
+    }
+    return rpc.data || null;
+  } catch (e) {
+    console.warn('sb_getActiveOfficialClosureForEmployee:', e);
     return null;
   }
 }
@@ -2395,6 +2792,518 @@ async function sb_fetchTenantSettingKeys(shortKeys) {
   }
 }
 
+function mergeFinanceItemsRemote(localArr, remoteArr) {
+  var byId = {};
+  function addItem(item) {
+    if (!item) return;
+    if (item.id == null || item.id === '') {
+      item.id = 'fin_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+    }
+    var id = String(item.id);
+    if (byId[id]) {
+      var prev = byId[id];
+      var prevTs = new Date(prev.updatedAt || prev.createdAt || 0).getTime();
+      var nextTs = new Date(item.updatedAt || item.createdAt || 0).getTime();
+      byId[id] = nextTs >= prevTs ? Object.assign({}, prev, item) : Object.assign({}, item, prev);
+    } else {
+      byId[id] = Object.assign({}, item);
+    }
+  }
+  (remoteArr || []).forEach(addItem);
+  (localArr || []).forEach(addItem);
+  return Object.keys(byId).map(function (id) { return byId[id]; }).sort(function (a, b) {
+    return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
+  });
+}
+
+function parseFinanceItemsValue(raw) {
+  if (raw == null || raw === '') return [];
+  if (Array.isArray(raw)) return normalizeFinanceItemsList(raw);
+  var cur = raw;
+  for (var pass = 0; pass < 4; pass++) {
+    if (Array.isArray(cur)) return normalizeFinanceItemsList(cur);
+    if (cur && typeof cur === 'object') {
+      if (Array.isArray(cur.items)) return normalizeFinanceItemsList(cur.items);
+      if (Array.isArray(cur.finance_items)) return normalizeFinanceItemsList(cur.finance_items);
+      if (Array.isArray(cur.financeItems)) return normalizeFinanceItemsList(cur.financeItems);
+      return [];
+    }
+    if (typeof cur !== 'string') break;
+    try { cur = JSON.parse(cur); } catch (e) { break; }
+  }
+  return Array.isArray(cur) ? normalizeFinanceItemsList(cur) : [];
+}
+
+function normalizeFinanceItemFields(item) {
+  if (!item || typeof item !== 'object') return item;
+  if (item.id == null || item.id === '') {
+    item.id = 'fin_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+  }
+  var empRaw = item.empId != null ? item.empId : (item.emp_id != null ? item.emp_id : item.employee_id);
+  var empNum = parseInt(empRaw, 10);
+  if (empNum > 0) item.empId = empNum;
+  else if (empRaw != null && empRaw !== '') item.empId = empRaw;
+  var typeRaw = String(item.type || '').trim();
+  var typeKey = typeRaw.toLowerCase();
+  var typeMap = {
+    deduction: 'deduction',
+    bonus: 'bonus',
+    loan: 'loan',
+    deduct: 'deduction',
+    reward: 'bonus',
+    advance: 'loan',
+    '\u062e\u0635\u0645': 'deduction',
+    '\u0645\u0643\u0627\u0641\u0623\u0629': 'bonus',
+    '\u0645\u0643\u0627\u0641\u0622\u062a': 'bonus',
+    '\u0633\u0644\u0641\u0629': 'loan',
+    '\u0633\u0644\u0641': 'loan'
+  };
+  if (typeMap[typeRaw]) item.type = typeMap[typeRaw];
+  else if (typeMap[typeKey]) item.type = typeMap[typeKey];
+  if (item.status == null || item.status === '') item.status = 'نشط';
+  return item;
+}
+
+function normalizeFinanceItemsList(list) {
+  if (!Array.isArray(list)) return [];
+  return list.map(function (item) {
+    return normalizeFinanceItemFields(Object.assign({}, item));
+  });
+}
+
+function assignFinanceItemsToStore(items, options) {
+  options = options || {};
+  var list = Array.isArray(items) ? normalizeFinanceItemsList(items) : parseFinanceItemsValue(items);
+  if (!list.length && window.appSettings && window.appSettings.financeItems && window.appSettings.financeItems.length
+      && options.replace === true && options.allowEmptyRemote !== true) {
+    window.__basmaFinanceHydrated = true;
+    window.__basmaFinanceCount = window.appSettings.financeItems.length;
+    return window.appSettings.financeItems;
+  }
+  window.appSettings = window.appSettings || {};
+  if (options.replace === true || options.forceRemote === true || !(window.appSettings.financeItems && window.appSettings.financeItems.length)) {
+    window.appSettings.financeItems = list;
+  } else {
+    window.appSettings.financeItems = mergeFinanceItemsRemote(window.appSettings.financeItems, list);
+  }
+  window.__basmaFinanceHydrated = true;
+  window.__basmaFinanceCount = (window.appSettings.financeItems || []).length;
+  if (typeof syncWindowState === 'function') syncWindowState();
+  if (window.__basmaFinanceCount > 0) {
+    console.info('[KYNO] finance items loaded:', window.__basmaFinanceCount);
+  }
+  return window.appSettings.financeItems;
+}
+
+async function sb_rpcGetFinanceItems() {
+  if (!_sbClient && !(await ensureSupabaseClient())) return null;
+  if (!(await ensureSbAuthForRead())) return null;
+  try {
+    var rpc = await _sbClient.rpc('saas_get_tenant_finance_items');
+    if (rpc.error) {
+      console.warn('sb_rpcGetFinanceItems:', rpc.error);
+      return null;
+    }
+    var payload = rpc.data;
+    if (typeof payload === 'string') {
+      try { payload = JSON.parse(payload); } catch (e) { payload = null; }
+    }
+    if (!payload || payload.ok !== true) {
+      if (payload && payload.error) {
+        console.warn('sb_rpcGetFinanceItems rejected:', payload.error, payload);
+      }
+      return null;
+    }
+    return parseFinanceItemsValue(payload.items);
+  } catch (e) {
+    console.warn('sb_rpcGetFinanceItems:', e);
+    return null;
+  }
+}
+
+async function sb_fetchFinanceItemsDirect() {
+  if (!_sbClient && !(await ensureSupabaseClient())) return null;
+  if (!(await ensureSbAuthForRead())) return null;
+  var cid = resolveActiveCompanyId();
+  if (!cid) return null;
+  var dbKey = 'company:' + cid + ':finance_items';
+  try {
+    var res = await _sbClient.from('app_settings').select('value').eq('key', dbKey).maybeSingle();
+    if (res.error) {
+      console.error('sb_fetchFinanceItemsDirect:', res.error);
+      return null;
+    }
+    if (!res.data || res.data.value == null || res.data.value === '') return [];
+    return parseFinanceItemsValue(res.data.value);
+  } catch (e) {
+    console.warn('sb_fetchFinanceItemsDirect:', e);
+    return null;
+  }
+}
+
+function applyRemoteFinanceItems(settings, options) {
+  options = options || {};
+  var remoteFinance = null;
+  if (Array.isArray(settings)) {
+    remoteFinance = settings;
+  } else if (settings && settings.finance_items != null && settings.finance_items !== '') {
+    remoteFinance = parseFinanceItemsValue(settings.finance_items);
+  } else if (settings && settings.items != null) {
+    remoteFinance = parseFinanceItemsValue(settings.items);
+  } else {
+    return false;
+  }
+  var existingCount = (window.appSettings && window.appSettings.financeItems) ? window.appSettings.financeItems.length : 0;
+  if (!remoteFinance.length && existingCount > 0 && options.allowEmptyRemote !== true) {
+    return false;
+  }
+  assignFinanceItemsToStore(remoteFinance, options);
+  if (typeof window.clearSalaryCacheForEmployee === 'function') {
+    (window.employees || []).forEach(function (e) {
+      if (e && e.id) window.clearSalaryCacheForEmployee(e.id);
+    });
+  }
+  return true;
+}
+
+var __basmaFinanceLoadPromise = null;
+var __FINANCE_RECOVERY_TYPES = { deduction: true, bonus: true, loan: true, '\u062e\u0635\u0645': true, '\u0645\u0643\u0627\u0641\u0623\u0629': true, '\u0645\u0643\u0627\u0641\u0622\u062a': true, '\u0633\u0644\u0641\u0629': true, '\u0633\u0644\u0641': true };
+
+function normalizeFinanceRecoveryType(raw) {
+  var key = String(raw || '').trim();
+  var lower = key.toLowerCase();
+  if (key === '\u062e\u0635\u0645' || lower === 'deduction' || lower === 'deduct') return 'deduction';
+  if (key === '\u0645\u0643\u0627\u0641\u0623\u0629' || key === '\u0645\u0643\u0627\u0641\u0622\u062a' || lower === 'bonus' || lower === 'reward') return 'bonus';
+  if (key === '\u0633\u0644\u0641\u0629' || key === '\u0633\u0644\u0641' || lower === 'loan' || lower === 'advance') return 'loan';
+  return __FINANCE_RECOVERY_TYPES[key] ? key : null;
+}
+
+function financePeriodFromIso(ts) {
+  if (!ts) return '';
+  var d = new Date(ts);
+  if (isNaN(d.getTime())) return String(ts).slice(0, 7);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+}
+
+function reconstructFinanceItemsFromNotifications(notifications) {
+  var list = Array.isArray(notifications) ? notifications.slice() : [];
+  list.sort(function (a, b) {
+    return new Date(a && (a.ts || a.createdAt || a.created_at) || 0).getTime()
+      - new Date(b && (b.ts || b.createdAt || b.created_at) || 0).getTime();
+  });
+  var byId = {};
+  list.forEach(function (n) {
+    if (!n || typeof n !== 'object') return;
+    var fType = normalizeFinanceRecoveryType(n.financeType || n.finance_type || n.type || n.notif_type);
+    if (!fType) return;
+    var action = String(n.action || 'add').toLowerCase();
+    var itemId = n.financeItemId != null && n.financeItemId !== ''
+      ? n.financeItemId
+      : (n.finance_item_id != null && n.finance_item_id !== '' ? n.finance_item_id : null);
+    if (!itemId) itemId = n.id || n.notif_ref || null;
+    if (!itemId) return;
+    var idKey = String(itemId);
+    if (action === 'delete') {
+      delete byId[idKey];
+      return;
+    }
+    if (action !== 'add' && action !== 'edit' && action !== 'applied') return;
+    var empRaw = n.empId != null ? n.empId : (n.employee_id != null ? n.employee_id : null);
+    var empNum = parseInt(empRaw, 10);
+    var ts = n.ts || n.createdAt || n.created_at || new Date().toISOString();
+    var amount = 0;
+    if (n.amount != null && n.amount !== '') amount = parseFloat(n.amount) || 0;
+    if (!amount && n.body) {
+      var m = String(n.body).replace(/,/g, '').match(/(\d+(?:\.\d+)?)\s*IQD/i);
+      if (m) amount = parseFloat(m[1]) || 0;
+    }
+    byId[idKey] = normalizeFinanceItemFields({
+      id: itemId,
+      empId: empNum > 0 ? empNum : empRaw,
+      type: fType,
+      amount: amount,
+      originalAmount: amount,
+      note: String(n.note || '').trim(),
+      status: 'نشط',
+      loanMode: 'direct',
+      installmentCount: 1,
+      paidInstallments: 0,
+      installmentAmount: 0,
+      createdAt: byId[idKey] && byId[idKey].createdAt ? byId[idKey].createdAt : ts,
+      updatedAt: ts,
+      date: String(ts).slice(0, 10),
+      period: financePeriodFromIso(ts),
+      _recoveredFromNotifications: true
+    });
+  });
+  return Object.keys(byId).map(function (id) { return byId[id]; }).sort(function (a, b) {
+    return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
+  });
+}
+
+async function fetchTableEmployeeNotificationsForRecovery() {
+  if (!_sbClient && !(await ensureSupabaseClient())) return [];
+  if (!(await ensureSbAuthForRead())) return [];
+  try {
+    var rpc = await _sbClient.rpc('saas_get_employee_notifications', { p_employee_id: null });
+    if (rpc.error || !rpc.data || rpc.data.ok !== true) return [];
+    var rows = rpc.data.data || [];
+    if (!Array.isArray(rows)) return [];
+    return rows.map(function (row) {
+      if (!row) return null;
+      var fType = normalizeFinanceRecoveryType(row.notif_type || row.type);
+      if (!fType) return null;
+      var body = String(row.body || '');
+      var amount = 0;
+      var m = body.replace(/,/g, '').match(/(\d+(?:\.\d+)?)\s*IQD/i);
+      if (m) amount = parseFloat(m[1]) || 0;
+      var action = body.indexOf('\u062d\u0630\u0641') >= 0 ? 'delete' : 'add';
+      return {
+        id: row.notif_ref || ('tbl_' + row.id),
+        financeItemId: row.notif_ref || ('tbl_' + row.id),
+        empId: row.employee_id,
+        financeType: fType,
+        action: action,
+        amount: amount,
+        note: body,
+        ts: row.created_at,
+        title: row.title,
+        body: body
+      };
+    }).filter(Boolean);
+  } catch (e) {
+    return [];
+  }
+}
+
+async function fetchEmployeeNotificationsBlobForRecovery() {
+  var merged = [];
+  if (window.appSettings && Array.isArray(window.appSettings.employeeNotifications)) {
+    merged = merged.concat(window.appSettings.employeeNotifications);
+  }
+  if (typeof sb_fetchTenantSettingKeys === 'function') {
+    var remote = await sb_fetchTenantSettingKeys(['employee_notifications']);
+    if (remote && remote.employee_notifications) {
+      try {
+        var parsed = JSON.parse(remote.employee_notifications);
+        if (Array.isArray(parsed)) merged = merged.concat(parsed);
+      } catch (e) { /* ignore */ }
+    }
+  }
+  var tableRows = await fetchTableEmployeeNotificationsForRecovery();
+  if (tableRows.length) merged = merged.concat(tableRows);
+  return merged;
+}
+
+async function sb_rpcRecoverFinanceItemsFromNotifications() {
+  if (!_sbClient && !(await ensureSupabaseClient())) return null;
+  if (!(await ensureSbAuthForRead())) return null;
+  try {
+    var rpc = await _sbClient.rpc('saas_recover_finance_items_from_notifications', { p_force: false });
+    if (rpc.error) return null;
+    var payload = rpc.data;
+    if (typeof payload === 'string') {
+      try { payload = JSON.parse(payload); } catch (e) { payload = null; }
+    }
+    if (!payload || payload.ok !== true) return null;
+    return parseFinanceItemsValue(payload.items);
+  } catch (e) {
+    return null;
+  }
+}
+
+async function recoverFinanceItemsFromNotificationsRemote(options) {
+  options = options || {};
+  var recovered = null;
+  if (options.tryRpc !== false && typeof sb_rpcRecoverFinanceItemsFromNotifications === 'function') {
+    recovered = await sb_rpcRecoverFinanceItemsFromNotifications();
+    if (recovered && recovered.length) return recovered;
+  }
+  var notifs = await fetchEmployeeNotificationsBlobForRecovery();
+  recovered = reconstructFinanceItemsFromNotifications(notifs);
+  return recovered && recovered.length ? recovered : null;
+}
+
+async function repairFinanceItemsToCloudIfNeeded(items, options) {
+  options = options || {};
+  if (!items || !items.length) return false;
+  if (options.skipCloudRepair === true) return false;
+  if (typeof window !== 'undefined' && window.currentUser === 'emp') return false;
+  if (typeof sb_saveSettings !== 'function') return false;
+  if (!_sbClient && !(await ensureSupabaseClient())) return false;
+  if (!(await ensureSbAuthForWrite())) return false;
+  try {
+    var ok = await sb_saveSettings({ finance_items: JSON.stringify(items) });
+    if (ok) console.info('[KYNO] finance_items restored to cloud:', items.length);
+    return !!ok;
+  } catch (e) {
+    console.warn('repairFinanceItemsToCloudIfNeeded:', e);
+    return false;
+  }
+}
+
+async function hydrateFinanceItemsFromCloud(options) {
+  options = options || {};
+  if (!_sbClient && !(await ensureSupabaseClient())) return false;
+  if (typeof AuthApi !== 'undefined' && AuthApi.refreshJwtContext) {
+    try { await AuthApi.refreshJwtContext(); } catch (e) { /* ignore */ }
+  }
+  if (!(await ensureSbAuthForRead())) return false;
+  try {
+    var shouldLoad = options.forceRemote === true
+      || options.replace === true
+      || window.__basmaFinanceHydrated !== true
+      || !(window.appSettings && window.appSettings.financeItems && window.appSettings.financeItems.length);
+    if (!shouldLoad) return true;
+
+    var storeOpts = {
+      replace: options.replace !== false || options.forceRemote === true,
+      forceRemote: options.forceRemote === true,
+      allowEmptyRemote: options.allowEmptyRemote === true
+    };
+
+    var rpcItems = await sb_rpcGetFinanceItems();
+    if (rpcItems !== null && rpcItems.length > 0) {
+      assignFinanceItemsToStore(rpcItems, storeOpts);
+      return true;
+    }
+
+    var direct = await sb_fetchFinanceItemsDirect();
+    if (direct !== null && direct.length > 0) {
+      assignFinanceItemsToStore(direct, storeOpts);
+      return true;
+    }
+
+    var settings = null;
+    if (typeof sb_fetchTenantSettingKeys === 'function') {
+      settings = await sb_fetchTenantSettingKeys(['finance_items']);
+    }
+    if ((!settings || settings.finance_items == null || settings.finance_items === '') && typeof sb_getSettings === 'function') {
+      settings = await sb_getSettings();
+    }
+    if (settings && settings.finance_items != null && settings.finance_items !== '') {
+      if (applyRemoteFinanceItems(settings, storeOpts)) return true;
+    }
+
+    if (rpcItems !== null) {
+      assignFinanceItemsToStore(rpcItems, storeOpts);
+      return rpcItems.length > 0;
+    }
+    if (direct !== null) {
+      assignFinanceItemsToStore(direct, storeOpts);
+      return direct.length > 0;
+    }
+
+    var recovered = await recoverFinanceItemsFromNotificationsRemote({ tryRpc: true });
+    if (recovered && recovered.length) {
+      assignFinanceItemsToStore(recovered, { replace: true, forceRemote: true });
+      await repairFinanceItemsToCloudIfNeeded(recovered, { skipCloudRepair: options.skipCloudRepair === true });
+      console.info('[KYNO] finance items recovered from employee_notifications:', recovered.length);
+      return true;
+    }
+
+    window.__basmaFinanceHydrated = true;
+    window.__basmaFinanceCount = (window.appSettings && window.appSettings.financeItems) ? window.appSettings.financeItems.length : 0;
+    return window.__basmaFinanceCount > 0;
+  } catch (e) {
+    console.warn('hydrateFinanceItemsFromCloud:', e);
+    return false;
+  }
+}
+
+async function ensureFinanceLoaded(options) {
+  options = options || { forceRemote: true, replace: false };
+  if (__basmaFinanceLoadPromise) return __basmaFinanceLoadPromise;
+  __basmaFinanceLoadPromise = hydrateFinanceItemsFromCloud(options).finally(function () {
+    __basmaFinanceLoadPromise = null;
+  });
+  return __basmaFinanceLoadPromise;
+}
+
+async function guardFinanceItemsCloudWrite(payload) {
+  if (!payload || payload.finance_items == null) return payload;
+  var local = [];
+  try { local = JSON.parse(payload.finance_items) || []; } catch (e) { local = []; }
+  if (local.length) return payload;
+
+  if (typeof sb_rpcGetFinanceItems === 'function') {
+    var rpcItems = await sb_rpcGetFinanceItems();
+    if (rpcItems && rpcItems.length) {
+      assignFinanceItemsToStore(rpcItems, { replace: true, forceRemote: true });
+      delete payload.finance_items;
+      return payload;
+    }
+  }
+  if (window.__basmaFinanceHydrated !== true) {
+    await hydrateFinanceItemsFromCloud({ forceRemote: true, skipCloudRepair: true });
+    local = (window.appSettings && window.appSettings.financeItems) || [];
+    if (local.length) {
+      payload.finance_items = JSON.stringify(local);
+      return payload;
+    }
+  } else {
+    local = (window.appSettings && window.appSettings.financeItems) || [];
+    if (local.length) {
+      payload.finance_items = JSON.stringify(local);
+      return payload;
+    }
+  }
+
+  var remoteSettings = typeof sb_getSettings === 'function' ? await sb_getSettings() : null;
+  if (remoteSettings && remoteSettings.finance_items != null && remoteSettings.finance_items !== '' && remoteSettings.finance_items !== '[]') {
+    var remote = [];
+    try { remote = JSON.parse(remoteSettings.finance_items) || []; } catch (e) { remote = []; }
+    if (remote.length) {
+      applyRemoteFinanceItems(remoteSettings);
+      delete payload.finance_items;
+      return payload;
+    }
+  }
+
+  var recovered = await recoverFinanceItemsFromNotificationsRemote({ tryRpc: true });
+  if (recovered && recovered.length) {
+    assignFinanceItemsToStore(recovered, { replace: true, forceRemote: true });
+    payload.finance_items = JSON.stringify(recovered);
+    return payload;
+  }
+
+  // لا تكتب finance_items: [] أبداً — هذا كان يمسح البيانات من app_settings
+  delete payload.finance_items;
+  return payload;
+}
+
+async function mergeRemoteFinanceBeforeCloudSave() {
+  if (!_sbClient && !(await ensureSupabaseClient())) return;
+  try {
+    await hydrateFinanceItemsFromCloud({ forceRemote: false });
+  } catch (e) {
+    console.warn('mergeRemoteFinanceBeforeCloudSave:', e);
+  }
+}
+
+// دمج إشعارات البثّ عن بُعد (حسب id، الأحدث updatedAt يفوز) — نفس نمط الحركات المالية
+function mergeBroadcastNoticesRemote(localArr, remoteArr) {
+  var byId = {};
+  function addItem(item) {
+    if (!item) return;
+    var id = String(item.id != null ? item.id : '');
+    if (!id) return;
+    if (byId[id]) {
+      var prev = byId[id];
+      var prevTs = new Date(prev.updatedAt || prev.createdAt || 0).getTime();
+      var nextTs = new Date(item.updatedAt || item.createdAt || 0).getTime();
+      byId[id] = nextTs >= prevTs ? Object.assign({}, prev, item) : Object.assign({}, item, prev);
+    } else {
+      byId[id] = Object.assign({}, item);
+    }
+  }
+  (remoteArr || []).forEach(addItem);
+  (localArr || []).forEach(addItem);
+  return Object.keys(byId).map(function (id) { return byId[id]; }).sort(function (a, b) {
+    return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
+  });
+}
+
 /** تطبيق إعدادات السحابة — لا تستبدل محلياً بعد حفظ حديث */
 function applyRemoteAppSettings(settings, options) {
   options = options || {};
@@ -2434,6 +3343,32 @@ function applyRemoteAppSettings(settings, options) {
       }
     }
   }
+  if (settings.official_closures_json != null) {
+    try {
+      var sharedClosures = JSON.parse(settings.official_closures_json || '[]') || [];
+      var normalizedRemote = typeof normalizeOfficialClosures === 'function'
+        ? normalizeOfficialClosures(sharedClosures)
+        : sharedClosures;
+      var localClosures = typeof normalizeOfficialClosures === 'function'
+        ? normalizeOfficialClosures(window.appSettings.officialClosures || [])
+        : (window.appSettings.officialClosures || []);
+      var remoteEmpty = !normalizedRemote.length;
+      var localHas = localClosures.length > 0;
+      var closuresLocalAt = window.__basmaOfficialClosuresLocalAt || 0;
+      var preferLocalClosures = preferLocal || (localHas && (Date.now() - closuresLocalAt < 300000));
+      if (options.forceRemote) {
+        window.appSettings.officialClosures = normalizedRemote;
+      } else if (preferLocalClosures && localHas && remoteEmpty) {
+        // لا تستبدل تعطيلاً محلياً جديداً بقيمة فارغة قديمة من السحابة
+      } else if (!remoteEmpty || !localHas) {
+        window.appSettings.officialClosures = normalizedRemote;
+      }
+    } catch (e) {
+      if (!preferLocal || !(window.appSettings.officialClosures || []).length) {
+        window.appSettings.officialClosures = [];
+      }
+    }
+  }
 
   if (!preferLocal) {
     if (settings.company_name != null && settings.company_name !== '') {
@@ -2456,10 +3391,25 @@ function applyRemoteAppSettings(settings, options) {
     if (settings.salary_deleted_map) {
       try { window.appSettings.salaryDeletedMap = JSON.parse(settings.salary_deleted_map) || {}; } catch (e) {}
     }
-    if (settings.finance_items) {
-      try { window.appSettings.financeItems = JSON.parse(settings.finance_items) || []; } catch (e) {}
+    if (settings.broadcast_notices) {
+      try {
+        var remoteBroadcast = JSON.parse(settings.broadcast_notices) || [];
+        window.appSettings.broadcastNotices = mergeBroadcastNoticesRemote(window.appSettings.broadcastNotices, remoteBroadcast);
+      } catch (e) {}
     }
   }
+
+  // finance_items — لا تُستبدل بقائمة فارغة بعد hydrateFinanceItemsFromCloud
+  var remoteFinance = (settings && settings.finance_items != null && settings.finance_items !== '')
+    ? parseFinanceItemsValue(settings.finance_items)
+    : null;
+  var hydratedCount = (window.appSettings && window.appSettings.financeItems) ? window.appSettings.financeItems.length : 0;
+  if (remoteFinance && remoteFinance.length) {
+    applyRemoteFinanceItems(settings, { forceRemote: !!options.forceRemote, replace: !!options.forceRemote });
+  } else if (!hydratedCount) {
+    applyRemoteFinanceItems(settings, { forceRemote: !!options.forceRemote, replace: !!options.forceRemote });
+  }
+
   if (!isSuper && settings.activity_log) {
     try {
       window.appSettings.activityLog = mergeActivityLogRemote(
@@ -2660,8 +3610,10 @@ function sb_buildDefaultSettingsPayload(companyName) {
     jobs_json: '[]',
     salary_deleted_map: '{}',
     finance_items: '[]',
+    broadcast_notices: '[]',
     activity_log: '[]',
     employee_notifications: '[]',
+    official_closures_json: '[]',
     gps_name: '',
     gps_lat: '',
     gps_lng: '',
@@ -2929,7 +3881,19 @@ async function sb_savePlatformGlobals(payload) {
 // ======= Departments & IDs =======
 async function sb_getNextEmployeeId() {
   if (!_sbClient && !(await ensureSupabaseClient())) return null;
-  // معرّف الموظف عالمي في الجدول — لا يُقيَّد بشركة واحدة
+  try {
+    var rpc = await _sbClient.rpc('saas_next_employee_id');
+    if (!rpc.error && rpc.data != null) {
+      var fromRpc = parseInt(rpc.data, 10);
+      if (fromRpc >= 1) return fromRpc;
+    }
+    if (rpc.error && !/Could not find the function|42883|PGRST202/i.test(rpc.error.message || '')) {
+      console.warn('sb_getNextEmployeeId rpc:', rpc.error);
+    }
+  } catch (e) {
+    console.warn('sb_getNextEmployeeId rpc:', e);
+  }
+  // fallback قبل تطبيق migration 088 — قد يُرجع معرّفاً خاطئاً لشركة بلا موظفين (RLS)
   var q = _sbClient.from('employees').select('id').order('id', { ascending: false }).limit(1);
   const { data, error } = await q;
   if (error) { console.warn('sb_getNextEmployeeId:', error); return null; }
@@ -3102,6 +4066,8 @@ function kynoEmployeeSyncHash(emp) {
     salStatus: emp.salStatus,
     salBonus: emp.salBonus,
     salDeletedPeriod: emp.salDeletedPeriod,
+    hireDate: emp.hireDate || '',
+    active: emp.active !== false,
     days: emp.days,
     lateMin: emp.lateMin,
     devices: emp.devices || []
@@ -3181,6 +4147,7 @@ async function syncToSupabase(options) {
   window.__basmaDisableAutoSync = true;
   try {
     await mergeRemoteOrgListsBeforeSave();
+    await mergeRemoteFinanceBeforeCloudSave();
     var settingsPayload = {
       company_name: window.appSettings.companyName || (saasCurrentUser && saasCurrentUser.company_name) || '',
       currency: window.appSettings.currency,
@@ -3195,10 +4162,16 @@ async function syncToSupabase(options) {
       jobs_json: JSON.stringify(window.appSettings.jobs || []),
       salary_deleted_map: JSON.stringify(window.appSettings.salaryDeletedMap || {}),
       finance_items: JSON.stringify(window.appSettings.financeItems || []),
+      broadcast_notices: JSON.stringify(window.appSettings.broadcastNotices || []),
       gps_name: window.appSettings.gpsName || '',
       gps_lat: window.appSettings.gpsLat || '',
       gps_lng: window.appSettings.gpsLng || '',
-      gps_range: String(window.appSettings.gpsRange || 100)
+      gps_range: String(window.appSettings.gpsRange || 100),
+      official_closures_json: JSON.stringify(
+        typeof normalizeOfficialClosures === 'function'
+          ? normalizeOfficialClosures(window.appSettings.officialClosures || [])
+          : (window.appSettings.officialClosures || [])
+      )
     };
     if (!isSuperSync) {
       settingsPayload.activity_log = JSON.stringify((window.appSettings.activityLog || []).slice(0, 500));
@@ -3208,6 +4181,7 @@ async function syncToSupabase(options) {
       delete settingsPayload.departments_json;
       delete settingsPayload.jobs_json;
     }
+    settingsPayload = await guardFinanceItemsCloudWrite(settingsPayload);
     var settingsOnly = options.settingsOnly === true;
     if (settingsOnly) {
       var settingsOkOnly = await sb_saveSettings(settingsPayload);
@@ -3264,8 +4238,34 @@ async function syncToSupabase(options) {
         if (empRef && empRef.company_id) att.company_id = empRef.company_id;
       }
       att.company_id = resolveActiveCompanyId(att);
-      var savedAtt = await sb_upsertAttendance(att);
-      if (savedAtt) {
+      var savedAtt = null;
+      var isEmpPortal = typeof currentUser !== 'undefined' && currentUser === 'emp';
+      if (isEmpPortal && typeof sb_upsertAttendanceFromDevice === 'function') {
+        if (!att._punchType) {
+          if (att.co && att.co !== '—') att._punchType = 'check_out';
+          else if (att.ci && att.ci !== '—') att._punchType = 'check_in';
+        }
+        savedAtt = await sb_upsertAttendanceFromDevice(att);
+        if (savedAtt && savedAtt.ok === false) {
+          if (sb_isPermanentAttendanceSyncError(savedAtt.error)) {
+            delete att._pendingRemoteSync;
+            if (savedAtt.error === 'official_closure_active' && typeof window.officialClosureForDate === 'function') {
+              var closureHit = window.officialClosureForDate(att.dateIso);
+              if (closureHit && window.attData) {
+                var attIdx = window.attData.indexOf(att);
+                if (attIdx >= 0) window.attData.splice(attIdx, 1);
+              }
+            }
+          }
+          return false;
+        }
+        if (savedAtt && savedAtt.ok === true && savedAtt.id) {
+          att.id = savedAtt.id;
+        }
+      } else {
+        savedAtt = await sb_upsertAttendance(att);
+      }
+      if (savedAtt && (savedAtt.ok === true || savedAtt.id || savedAtt.employee_id)) {
         att._lastCloudSyncHash = att._nextSyncHash;
         att._remoteSyncedAt = Date.now();
         delete att._pendingRemoteSync;
@@ -3320,6 +4320,29 @@ async function syncToSupabase(options) {
   }
 }
 
+function _syncRecentAttendanceFromIso(daysBack) {
+  daysBack = daysBack || 120;
+  var d = new Date();
+  d.setDate(d.getDate() - daysBack);
+  return d.toISOString().slice(0, 10);
+}
+
+function scheduleFullAttendanceCloudSync(reason) {
+  if (window.__basmaFullAttSyncRunning || window.__basmaFullAttSyncQueued) return;
+  window.__basmaFullAttSyncQueued = true;
+  setTimeout(function () {
+    window.__basmaFullAttSyncQueued = false;
+    if (window.__basmaFullAttSyncRunning) return;
+    syncFromSupabase({
+      reason: reason || 'attendance-full',
+      attendanceOnly: true,
+      forceFullAttendance: true,
+      keepDisableAutoSync: true,
+      realtime: true
+    }).catch(function (e) { console.warn('scheduleFullAttendanceCloudSync:', e); });
+  }, 800);
+}
+
 async function syncFromSupabase(options) {
   options = options || {};
   if (!_sbClient && !(await ensureSupabaseClient())) {
@@ -3334,13 +4357,69 @@ async function syncFromSupabase(options) {
   }
   window.__basmaDisableAutoSync = true;
   try {
-    var emps = await sb_getEmployees({ limit: 500 });
+    if (options.attendanceOnly) {
+      window.__basmaFullAttSyncRunning = true;
+      var fullAtts = null;
+      if (typeof sb_fetchAllAttendance === 'function') {
+        fullAtts = await sb_fetchAllAttendance({});
+      }
+      if (fullAtts !== null) {
+        if (typeof mergeLocalPendingAttendance === 'function') {
+          fullAtts = mergeLocalPendingAttendance(fullAtts, window.employees || []);
+        }
+        if (typeof filterAttendanceForEmployees === 'function') {
+          window.attData = filterAttendanceForEmployees(window.employees || [], fullAtts);
+        } else {
+          window.attData = fullAtts;
+        }
+        if (typeof normalizeAttendanceStore === 'function') normalizeAttendanceStore();
+        if (typeof syncWindowState === 'function') syncWindowState();
+        if (typeof buildAttendance === 'function') buildAttendance();
+        if (typeof buildDashboard === 'function') buildDashboard();
+      }
+      return fullAtts !== null;
+    }
+
+    var quick = options.quick === true;
+    var fullAttendance = options.forceFullAttendance === true || options.forceRemote === true || !quick;
+    var phase1 = await Promise.all([
+      sb_getEmployees({ limit: 500 }),
+      sb_getSettings(),
+      hydrateFinanceItemsFromCloud({ forceRemote: true, replace: true })
+    ]);
+    var emps = phase1[0];
+    var settings = phase1[1];
     if (emps === null && !options.realtime) {
       console.warn('syncFromSupabase: employees fetch failed');
       return false;
     }
-    var atts = await sb_getAttendance({ limit: 3000 });
-    var settings = await sb_getSettings();
+    var atts = null;
+    if (fullAttendance) {
+      if (typeof sb_fetchAllAttendance === 'function') {
+        atts = await sb_fetchAllAttendance({});
+      } else {
+        atts = [];
+        var attOffset = 0;
+        var attPageSize = 500;
+        while (true) {
+          var attPage = await sb_getAttendance({ limit: attPageSize, offset: attOffset });
+          if (attPage === null) {
+            if (attOffset === 0) {
+              console.warn('syncFromSupabase: attendance fetch failed');
+              atts = null;
+            }
+            break;
+          }
+          if (!attPage.length) break;
+          atts = atts.concat(attPage);
+          if (attPage.length < attPageSize) break;
+          attOffset += attPageSize;
+        }
+      }
+    } else if (typeof sb_fetchAllAttendance === 'function') {
+      atts = await sb_fetchAllAttendance({ dateFrom: _syncRecentAttendanceFromIso(120) });
+      scheduleFullAttendanceCloudSync(options.reason || 'post-login');
+    }
     if (emps !== null) {
       if (options.forceRemote) {
         if (typeof filterRecentlyDeletedEmployees === 'function') {
@@ -3400,18 +4479,31 @@ async function syncFromSupabase(options) {
       syncAllAttendanceEmployeeNames();
     }
     if (typeof syncLeavesFromSupabase === 'function') {
-      await syncLeavesFromSupabase();
+      if (quick && !options.forceRemote) {
+        syncLeavesFromSupabase().catch(function (e) { console.warn('syncFromSupabase leaves:', e); });
+      } else {
+        await syncLeavesFromSupabase();
+      }
     }
     if (settings !== null) {
       applyRemoteAppSettings(settings, { forceRemote: !!options.forceRemote });
       if (typeof filterNotificationsForCurrentTenant === 'function') filterNotificationsForCurrentTenant();
+      if (!(window.appSettings && window.appSettings.financeItems && window.appSettings.financeItems.length)) {
+        await hydrateFinanceItemsFromCloud({ forceRemote: true, replace: true });
+      }
       var tableDepts = await sb_getDepartmentNames();
       if (tableDepts !== null && tableDepts.length) {
         var jsonDepts = window.appSettings.departments || [];
         window.appSettings.departments = dedupeOrgNames(jsonDepts.concat(tableDepts));
       }
     }
-    if (typeof sb_loadPlatformGlobals === 'function') await sb_loadPlatformGlobals();
+    if (typeof sb_loadPlatformGlobals === 'function') {
+      if (quick && !options.forceRemote) {
+        sb_loadPlatformGlobals().catch(function (e) { console.warn('sb_loadPlatformGlobals:', e); });
+      } else {
+        await sb_loadPlatformGlobals();
+      }
+    }
     if (typeof syncWindowState === 'function') syncWindowState();
     if (typeof saveData === 'function') saveData();
     if (typeof refreshAll === 'function') refreshAll();
@@ -3432,11 +4524,22 @@ async function syncFromSupabase(options) {
       if (typeof filterLocalDataByCompany === 'function') filterLocalDataByCompany(syncedCid);
       if (typeof filterNotificationsForCurrentTenant === 'function') filterNotificationsForCurrentTenant();
     }
+    if (typeof window.backfillAllHireDateAbsences === 'function' && window.currentUser !== 'emp' && !options.realtime) {
+      setTimeout(function () {
+        window.backfillAllHireDateAbsences({ silent: true }).then(function (hireBf) {
+          if (hireBf && hireBf.created > 0) {
+            if (typeof normalizeAttendanceStore === 'function') normalizeAttendanceStore();
+            if (typeof buildAttendance === 'function') buildAttendance();
+          }
+        }).catch(function (e) { console.warn('syncFromSupabase hire backfill:', e); });
+      }, 0);
+    }
     return true;
   } catch (e) {
     console.warn('syncFromSupabase failed:', e);
     return false;
   } finally {
+    window.__basmaFullAttSyncRunning = false;
     if (!options.keepDisableAutoSync) window.__basmaDisableAutoSync = false;
   }
 }
@@ -4073,7 +5176,9 @@ async function sb_checkSubscriptionStatus(companyId) {
   }
 
   const sub = await sb_getSubscription(cid);
-  if (!sub) return { valid: false, status: 'pending', message: 'لا يوجد اشتراك نشط', daysLeft: 0 };
+  if (!sub) {
+    return { valid: true, status: 'active', message: '', daysLeft: 0, warning: false, unchecked: true };
+  }
   if (sub.status === 'suspended') {
     return { valid: false, status: 'suspended', message: 'حساب الشركة موقوف. تواصل مع الدعم الفني.', end_date: sub.end_date, daysLeft: 0 };
   }
@@ -4581,6 +5686,8 @@ function mapEmployeeFromDb(row) {
     salBonus:     row.sal_bonus || 0,
     salDeletedPeriod: row.sal_deleted_period || '',
     avatarUrl:    row.avatar_url || '',
+    hireDate:     row.hire_date ? String(row.hire_date).slice(0, 10) : '',
+    active:       row.active !== false,
     company_id:   row.company_id != null ? row.company_id : undefined,
     devices: (row.employee_devices || []).map(d => ({
       slot: d.slot, label: d.label,
@@ -4623,12 +5730,14 @@ function mapEmployeeToDb(emp) {
     sal_status:   emp.salStatus || 'معلق',
     sal_bonus:    typeof parseExactInt === 'function' ? parseExactInt(emp.salBonus, 0) : (emp.salBonus || 0),
     sal_deleted_period: emp.salDeletedPeriod || '',
-    avatar_url:   emp.avatarUrl || null
+    avatar_url:   emp.avatarUrl || null,
+    hire_date:    emp.hireDate ? String(emp.hireDate).slice(0, 10) : null,
+    active:       emp.active !== false
   };
 }
 
 function mapAttFromDb(row) {
-  return {
+  var rec = {
     id:      row.id,
     empId:   row.employee_id,
     emp:     row.emp_name,
@@ -4643,6 +5752,11 @@ function mapAttFromDb(row) {
     status:  row.status || 'غياب',
     company_id: row.company_id != null ? row.company_id : undefined
   };
+  if (row.admin_reason) {
+    rec._adminReason = String(row.admin_reason);
+    if (rec._adminReason === 'admin_batch_absence') rec._adminBatchAbsence = true;
+  }
+  return rec;
 }
 
 function mapAttToDb(rec) {
@@ -4941,7 +6055,64 @@ async function sb_saveSuperAdminPrefs(prefs) {
   } catch (e) { console.warn('sb_saveSuperAdminPrefs:', e); return false; }
 }
 
+async function sb_logEmployeePortalEvent(empId, eventType, options) {
+  options = options || {};
+  if (!empId || !eventType) return { ok: false, error: 'invalid_params' };
+  if (!_sbClient && !(await ensureSupabaseClient())) return { ok: false, error: 'cloud_unavailable' };
+  var fp = getDeviceFingerprintForRpc();
+  var geo = options.geo || null;
+  try {
+    var rpc = await _sbClient.rpc('saas_log_employee_portal_event', {
+      p_employee_id: empId,
+      p_fingerprint: fp || null,
+      p_event_type: eventType,
+      p_success: options.success !== false,
+      p_ip: options.ip || null,
+      p_user_agent: options.userAgent || null,
+      p_geo_lat: geo && geo.lat != null ? geo.lat : null,
+      p_geo_lng: geo && geo.lng != null ? geo.lng : null,
+      p_geo_accuracy: geo && geo.accuracy != null ? geo.accuracy : null,
+      p_meta: options.meta || {}
+    });
+    if (rpc.error) {
+      console.warn('sb_logEmployeePortalEvent:', rpc.error);
+      return { ok: false, error: rpc.error.message || 'rpc_error' };
+    }
+    return rpc.data || { ok: false };
+  } catch (e) {
+    console.warn('sb_logEmployeePortalEvent:', e);
+    return { ok: false, error: e.message || 'cloud_unavailable' };
+  }
+}
+
+async function sb_listEmployeePortalAccessLog(filters) {
+  filters = filters || {};
+  if (!_sbClient && !(await ensureSupabaseClient())) return null;
+  if (!(await ensureSbAuthForRead())) return null;
+  try {
+    var rpc = await _sbClient.rpc('saas_list_employee_portal_access_log', {
+      p_employee_id: filters.employeeId || null,
+      p_search: filters.search || null,
+      p_event_type: filters.eventType || null,
+      p_date_from: filters.dateFrom || null,
+      p_date_to: filters.dateTo || null,
+      p_success: filters.success === true ? true : (filters.success === false ? false : null),
+      p_limit: filters.limit != null ? filters.limit : 200,
+      p_offset: filters.offset != null ? filters.offset : 0
+    });
+    if (rpc.error) {
+      console.warn('sb_listEmployeePortalAccessLog:', rpc.error);
+      return null;
+    }
+    return rpc.data;
+  } catch (e) {
+    console.warn('sb_listEmployeePortalAccessLog:', e);
+    return null;
+  }
+}
+
 if (typeof window !== 'undefined') {
+  window.sb_adminResetEmployeeDeviceRateLimit = sb_adminResetEmployeeDeviceRateLimit;
   window.sb_getSuperAdminPrefs = sb_getSuperAdminPrefs;
   window.sb_saveSuperAdminPrefs = sb_saveSuperAdminPrefs;
   window.slimSuperAdminActivityLogForCloud = slimSuperAdminActivityLogForCloud;
@@ -4960,4 +6131,20 @@ if (typeof window !== 'undefined') {
   window.sb_isPermanentEmployeeSaveError = sb_isPermanentEmployeeSaveError;
   window.ensureSbAuthForWrite = ensureSbAuthForWrite;
   window.ensureSbAuthForRead = ensureSbAuthForRead;
+  window.getSupabaseUrl = getSupabaseUrl;
+  window.getSupabaseAnonKey = getSupabaseAnonKey;
+  window.sb_logEmployeePortalEvent = sb_logEmployeePortalEvent;
+  window.sb_listEmployeePortalAccessLog = sb_listEmployeePortalAccessLog;
+  window.sb_adoptBrowserFingerprint = sb_adoptBrowserFingerprint;
+  window.hydrateFinanceItemsFromCloud = hydrateFinanceItemsFromCloud;
+  window.ensureFinanceLoaded = ensureFinanceLoaded;
+  window.recoverFinanceItemsFromNotificationsRemote = recoverFinanceItemsFromNotificationsRemote;
+  window.reconstructFinanceItemsFromNotifications = reconstructFinanceItemsFromNotifications;
+  window.repairFinanceItemsToCloudIfNeeded = repairFinanceItemsToCloudIfNeeded;
+  window.guardFinanceItemsCloudWrite = guardFinanceItemsCloudWrite;
+  window.applyRemoteFinanceItems = applyRemoteFinanceItems;
+  window.sb_fetchFinanceItemsDirect = sb_fetchFinanceItemsDirect;
+  window.sb_rpcGetFinanceItems = sb_rpcGetFinanceItems;
+  window.assignFinanceItemsToStore = assignFinanceItemsToStore;
+  window.parseFinanceItemsValue = parseFinanceItemsValue;
 }

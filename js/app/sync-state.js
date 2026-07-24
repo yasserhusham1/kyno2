@@ -11,6 +11,9 @@
       global.saasCurrentUser = global._saasCurrentUser;
     }
     if (global.charts == null) global.charts = {};
+    if (global.appSettings == null && typeof global.createDefaultAppSettings === 'function') {
+      global.appSettings = global.createDefaultAppSettings('');
+    }
   }
 
   global.syncWindowState = syncWindowState;

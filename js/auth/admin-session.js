@@ -3,26 +3,6 @@
  */
 function saveAdminSession(user) {
   if (typeof BasmaSession !== 'undefined') { BasmaSession.saveAdminSessionMeta(user); return; }
-  if (!user || !user.id) return;
-  try {
-    localStorage.setItem(ADMIN_SESSION_KEY, JSON.stringify({
-      id: user.id,
-      ts: Date.now(),
-      user: {
-        id: user.id,
-        username: user.username,
-        display_name: user.display_name || '',
-        email: user.email || '',
-        role: user.role,
-        permissions: user.permissions || {},
-        company_id: user.company_id != null ? (parseInt(user.company_id, 10) || null) : null,
-        company_name: user.company_name || null,
-        company_code: user.company_code || null,
-        company_status: user.company_status || null,
-        max_employees: user.max_employees || 0
-      }
-    }));
-  } catch (e) {}
 }
 
 function applyAdminSession(user) {
@@ -91,7 +71,7 @@ async function tryAutoAdminLogin() {
         if (typeof syncFromSupabase === 'function') {
           var forceRemote = !!window.__basmaTenantNeedsCloudReset;
           try {
-            await syncFromSupabase({ reason: 'admin-cookie-login', forceRemote: forceRemote, keepDisableAutoSync: true });
+            await syncFromSupabase({ reason: 'admin-cookie-login', forceRemote: forceRemote, keepDisableAutoSync: true, quick: true });
           } catch (e) { console.warn('admin-cookie-login sync:', e); }
           window.__basmaTenantNeedsCloudReset = false;
         }
@@ -103,13 +83,10 @@ async function tryAutoAdminLogin() {
       }
     }
 
-    var raw = localStorage.getItem(ADMIN_SESSION_KEY);
-    if (!raw) return false;
-    var session = JSON.parse(raw);
-    if (!session || !session.id) return false;
-
-    var cachedUser = session.user || null;
-    var remoteUser = await verifyAdminSessionRemote(session.id, 8000);
+    return false;
+    var session = null;
+    var cachedUser = null;
+    var remoteUser = null;
     if (remoteUser) {
       if (remoteUser.company_status === 'suspended') {
         clearAdminSession();
@@ -190,7 +167,7 @@ async function tryAutoAdminLogin() {
     if (typeof syncFromSupabase === 'function') {
       var forceRemoteLogin = !!window.__basmaTenantNeedsCloudReset;
       try {
-        await syncFromSupabase({ reason: 'admin-auto-login', forceRemote: forceRemoteLogin, keepDisableAutoSync: true });
+        await syncFromSupabase({ reason: 'admin-auto-login', forceRemote: forceRemoteLogin, keepDisableAutoSync: true, quick: true });
       } catch (e) {
         console.warn('admin auto-login sync failed:', e);
       }

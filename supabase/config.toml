@@ -1,5 +1,5 @@
 # Supabase local / deploy config — مهم: verify_jwt = false لدوال الدخول
-project_id = "qalcnvygyjtlmlauvzlk"
+project_id = "gxiofbdykxjkdgdcmsnp"
 
 [functions.auth-login]
 verify_jwt = false

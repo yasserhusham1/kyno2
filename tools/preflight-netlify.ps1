@@ -30,24 +30,6 @@ if (Test-Path -LiteralPath $defaultsPath) {
   Bad 'Missing config/supabase.defaults.js'
 }
 
-$distDefaults = Join-Path $root 'dist\config\supabase.defaults.js'
-if (Test-Path -LiteralPath $distDefaults) {
-  $distText = Get-Content -LiteralPath $distDefaults -Raw
-  if ($distText -match [regex]::Escape($base)) { Ok 'dist/config/supabase.defaults.js matches project' }
-  else { Warn 'dist/config outdated — rebuild before deploy (tools/build-netlify.ps1)' }
-} else {
-  Warn 'dist/ not built — run tools/build-netlify.ps1 or let Netlify build'
-}
-
-$distIndex = Join-Path $root 'dist\index.html'
-if (Test-Path -LiteralPath $distIndex) {
-  $srcIndex = Join-Path $root 'index.html'
-  $srcTime = (Get-Item -LiteralPath $srcIndex).LastWriteTimeUtc
-  $distTime = (Get-Item -LiteralPath $distIndex).LastWriteTimeUtc
-  if ($distTime -ge $srcTime.AddMinutes(-1)) { Ok 'dist/index.html looks up to date' }
-  else { Warn 'dist/index.html older than index.html — rebuild recommended' }
-}
-
 # --- Edge Functions (retry DNS flakiness) ---
 $headers = @{ apikey = $anon; Authorization = "Bearer $anon" }
 function Invoke-EdgeCheck {

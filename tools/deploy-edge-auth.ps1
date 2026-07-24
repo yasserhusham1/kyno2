@@ -18,7 +18,7 @@ Write-Host "Using Supabase CLI: $supabaseExe"
 
 Push-Location $root
 try {
-  $projectRef = 'qalcnvygyjltmlauvzlk'
+  $projectRef = 'gxiofbdykxjkdgdcmsnp'
   foreach ($fn in @('auth-login', 'auth-session', 'auth-logout', 'auth-set-password')) {
     Write-Host "Deploying $fn ..."
     & $supabaseExe functions deploy $fn --project-ref $projectRef --no-verify-jwt

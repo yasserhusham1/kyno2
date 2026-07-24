@@ -16,10 +16,6 @@
     if (global.saasCurrentUser && global.saasCurrentUser.company_id) {
       return parseInt(global.saasCurrentUser.company_id, 10);
     }
-    try {
-      var empCid = parseInt(global.localStorage.getItem('basma_employee_company_id') || '0', 10);
-      if (empCid > 0) return empCid;
-    } catch (e) { /* ignore */ }
     return null;
   }
 

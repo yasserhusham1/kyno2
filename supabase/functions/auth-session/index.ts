@@ -1,9 +1,9 @@
 // Deploy: supabase functions deploy auth-session
 /// <reference path="../env.d.ts" />
-import { COOKIE_NAME, corsHeaders, readCookie, sha256Hex, jsonResponse } from './_shared/session.ts';
-import { createServiceClient } from './_shared/supabase.ts';
-import { parseSaasUser } from './_shared/types.ts';
-import { issueTokensForSaasUser } from './_shared/auth-jwt.ts';
+import { COOKIE_NAME, corsHeaders, readCookie, sha256Hex, jsonResponse } from '../_shared/session.ts';
+import { createServiceClient } from '../_shared/supabase.ts';
+import { parseSaasUser } from '../_shared/types.ts';
+import { issueTokensForSaasUser } from '../_shared/auth-jwt.ts';
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {

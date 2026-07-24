@@ -58,9 +58,13 @@
 
       financeItems: [],
 
+      broadcastNotices: [],
+
       activityLog: [],
 
       employeeNotifications: [],
+
+      officialClosures: [],
 
       departments: [],
 

@@ -3,7 +3,7 @@
 # Prefer: $env:SUPABASE_ACCESS_TOKEN='sbp_...'; powershell -File tools/deploy-edge-auth.ps1
 
 param(
-  [string]$ProjectRef = 'qalcnvygyjltmlauvzlk',
+  [string]$ProjectRef = 'gxiofbdykxjkdgdcmsnp',
   [string]$AccessToken = $env:SUPABASE_ACCESS_TOKEN,
   [string]$Root = (Split-Path $PSScriptRoot -Parent)
 )
@@ -70,5 +70,11 @@ foreach ($slug in @('auth-login', 'auth-session', 'auth-logout', 'auth-set-passw
 }
 
 Write-Host 'Done. In Dashboard: Edge Functions > each function > Verify JWT = OFF'
+
+
+
+
+
+
 
 

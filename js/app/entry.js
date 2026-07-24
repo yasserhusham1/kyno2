@@ -14,15 +14,19 @@ import {
   markCompanyTenantFresh,
   clearCompanyTenantFresh,
   wipeTenantStorage
-} from './data.js';
-import { buildEmployees } from '../employees/ui.js';
-import { buildAttendance } from '../attendance/ui.js';
+} from './data.js?v=20260716f';
+import { buildEmployees } from '../employees/ui.js?v=20260716e';
+import { buildAttendance } from '../attendance/ui.js?v=20260709e';
 import {
   buildDeviceManagement,
   openEmployeeDeviceEditor,
   clearEmployeeDeviceSlotInForm,
-  refreshDeviceManagementFromCloud
-} from '../attendance/device-mgmt.js';
+  unlockEmployeeDeviceAttemptsInForm,
+  refreshDeviceManagementFromCloud,
+  switchDeviceMgmtTab,
+  debounceDeviceTrackingSearch,
+  refreshDeviceTrackingLog
+} from '../attendance/device-mgmt.js?v=20260721a';
 
 window.loadData = loadData;
 window.saveData = saveData;
@@ -39,7 +43,11 @@ window.buildAttendance = buildAttendance;
 window.buildDeviceManagement = buildDeviceManagement;
 window.openEmployeeDeviceEditor = openEmployeeDeviceEditor;
 window.clearEmployeeDeviceSlotInForm = clearEmployeeDeviceSlotInForm;
+window.unlockEmployeeDeviceAttemptsInForm = unlockEmployeeDeviceAttemptsInForm;
 window.refreshDeviceManagementFromCloud = refreshDeviceManagementFromCloud;
+window.switchDeviceMgmtTab = switchDeviceMgmtTab;
+window.debounceDeviceTrackingSearch = debounceDeviceTrackingSearch;
+window.refreshDeviceTrackingLog = refreshDeviceTrackingLog;
 
 window.__basmaModulesReady = true;
 window.dispatchEvent(new CustomEvent('basma:modules-ready'));

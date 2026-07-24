@@ -10,6 +10,7 @@
   var _pullTimer = null;
   var _immediateSyncTimer = null;
   var _inited = false;
+  var _needsCloudFlush = false;
 
   function isOnline() {
     return typeof navigator !== 'undefined' ? navigator.onLine !== false : true;
@@ -22,17 +23,15 @@
   }
 
   function markNeedsCloudFlush() {
-    try {
-      localStorage.setItem(queueStorageKey(), String(Date.now()));
-    } catch (e) { /* ignore */ }
+    _needsCloudFlush = true;
   }
 
   function clearNeedsCloudFlush() {
-    try { localStorage.removeItem(queueStorageKey()); } catch (e) { /* ignore */ }
+    _needsCloudFlush = false;
   }
 
   function needsCloudFlush() {
-    try { return !!localStorage.getItem(queueStorageKey()); } catch (e) { return false; }
+    return _needsCloudFlush;
   }
 
   function updateConnectivityBanner() {
@@ -40,7 +39,7 @@
     if (!el) return;
     if (!isOnline()) {
       el.style.display = '';
-      el.innerHTML = '<i class="fa fa-wifi"></i> بدون اتصال — التعديلات تُحفظ وتُرفع تلقائياً عند عودة الشبكة';
+      el.innerHTML = '<i class="fa fa-wifi"></i> لا يوجد اتصال بالإنترنت — لا يمكن حفظ البيانات حتى يعود الاتصال';
       if (global.BasmaLeaveGuard && global.BasmaLeaveGuard.updateSyncStatusUi) {
         global.BasmaLeaveGuard.updateSyncStatusUi();
       }
@@ -175,7 +174,7 @@
       window.addEventListener('offline', function () {
         updateConnectivityBanner();
         if (global.BasmaToast && global.BasmaToast.warn) {
-          global.BasmaToast.warn('انقطع الاتصال — سيتم حفظ التعديلات ورفعها عند عودة الشبكة');
+          global.BasmaToast.warn('لا يوجد اتصال بالإنترنت — لن يتم حفظ أي تعديل حتى يعود الاتصال');
         }
       });
     }
