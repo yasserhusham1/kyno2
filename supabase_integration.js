@@ -5795,7 +5795,7 @@ document.addEventListener('DOMContentLoaded', function () {
     if (typeof currentUser !== 'undefined' && currentUser) return;
     var app = document.getElementById('app');
     if (app && app.style.display === 'block') return;
-    if (typeof runAutoLoginRestore === 'function') await runAutoLoginRestore();
+    // runAutoLoginRestore: removed here — single entry via main.js bootstrapAppShell (Task 2.2a)
   }, 300);
 });
 

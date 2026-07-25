@@ -4784,6 +4784,7 @@ async function tryAutoEmployeeLogin() {
 
 async function runAutoLoginRestore() {
   if (window.__basmaQrRegistrationInProgress || (typeof hasQrRegistrationParams === 'function' && hasQrRegistrationParams())) return false;
+  if (window.__basmaAutoLoginRestoreDone) return !!currentUser;
   if (_autoLoginRestoreRunning) return !!currentUser;
   if (currentUser) return true;
   var app = document.getElementById('app');
@@ -4804,6 +4805,7 @@ async function runAutoLoginRestore() {
     return false;
   } finally {
     _autoLoginRestoreRunning = false;
+    window.__basmaAutoLoginRestoreDone = true;
   }
 }
 
@@ -4940,14 +4942,8 @@ document.addEventListener('DOMContentLoaded', function () {
   bootstrapAppShell();
 });
 
-window.addEventListener('load', function() {
-  if (window.__basmaQrRegistrationInProgress || (typeof hasQrRegistrationParams === 'function' && hasQrRegistrationParams())) return;
-  if (currentUser) return;
-  var app = document.getElementById('app');
-  if (app && app.style.display === 'block') return;
-  runAutoLoginRestore();
-});
-
+// Auto-login restore runs once from bootstrapAppShell (checkQrRegisterFromUrl → runAutoLoginRestore).
+// Removed duplicate window.load listener (Phase 1 / Task 2.2a).
 
 // Notifications are now generated dynamically in buildNotifications()
 let notifications = [];
