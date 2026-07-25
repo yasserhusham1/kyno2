@@ -940,6 +940,7 @@ async function sb_rpcSavePlatformGlobals(payload) {
     if (payload.supportWhatsApp != null) body.support_whatsapp = String(payload.supportWhatsApp).trim();
     if (payload.supportWhatsAppTeam != null) body.support_whatsapp_team = String(payload.supportWhatsAppTeam).trim();
     if (payload.announcements != null) body.announcements = payload.announcements;
+    if (payload.announcements != null) _clearPlatformAnnouncementsSessionCache();
     var rpc = await _sbClient.rpc('saas_save_platform_globals', { p_payload: body });
     if (rpc.error) return { ok: false, error: rpc.error.message || String(rpc.error) };
     if (!rpc.data || rpc.data.ok !== true) return { ok: false, error: (rpc.data && rpc.data.error) || 'rpc_failed' };
@@ -1361,6 +1362,7 @@ async function syncAttendanceRealtimePull(options) {
 
 async function setupSupabaseRealtime() {
   if (_sbRealtimeChannel) return _sbRealtimeChannel;
+  if (typeof currentUser === 'undefined' || !currentUser) return null;
   if (!_sbClient && !(await ensureSupabaseClient())) return null;
   if (typeof ensureSbAuthForRead === 'function') {
     var canRead = await ensureSbAuthForRead();
@@ -3654,6 +3656,35 @@ function _savePlatformAnnouncementsCache(list) {
   try {
     localStorage.setItem('basma_platform_announcements_cache', JSON.stringify(list || []));
     localStorage.setItem('basma_platform_announcements_cache_at', String(Date.now()));
+    _savePlatformAnnouncementsSessionCache(list);
+  } catch (e) {}
+}
+
+var _PLATFORM_ANN_SESSION_TTL_MS = 3600000;
+
+function _loadPlatformAnnouncementsSessionCache() {
+  try {
+    var raw = sessionStorage.getItem('basma_platform_announcements_session_cache');
+    var at = parseInt(sessionStorage.getItem('basma_platform_announcements_session_cache_at'), 10);
+    if (!raw || !at || (Date.now() - at) >= _PLATFORM_ANN_SESSION_TTL_MS) return null;
+    var list = _parsePlatformAnnouncements(raw);
+    return list.length ? list : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function _savePlatformAnnouncementsSessionCache(list) {
+  try {
+    sessionStorage.setItem('basma_platform_announcements_session_cache', JSON.stringify(list || []));
+    sessionStorage.setItem('basma_platform_announcements_session_cache_at', String(Date.now()));
+  } catch (e) {}
+}
+
+function _clearPlatformAnnouncementsSessionCache() {
+  try {
+    sessionStorage.removeItem('basma_platform_announcements_session_cache');
+    sessionStorage.removeItem('basma_platform_announcements_session_cache_at');
   } catch (e) {}
 }
 
@@ -3771,28 +3802,34 @@ async function sb_fetchPublicSupportWhatsApp() {
 }
 
 async function sb_fetchPlatformAnnouncementsRemote() {
+  var sessionCached = _loadPlatformAnnouncementsSessionCache();
+  if (sessionCached) return sessionCached;
   if (!_sbClient && !(await ensureSupabaseClient())) return null;
+  var result = null;
   try {
     var annRpc = await _sbClient.rpc('get_platform_announcements');
     if (!annRpc.error && annRpc.data != null) {
-      return _parsePlatformAnnouncements(annRpc.data);
+      result = _parsePlatformAnnouncements(annRpc.data);
     }
   } catch (e) {
     console.warn('get_platform_announcements:', e);
   }
-  try {
-    var fullRpc = await _sbClient.rpc('get_platform_public_settings');
-    if (!fullRpc.error && fullRpc.data) {
-      var d = fullRpc.data;
-      if (typeof d === 'string') {
-        try { d = JSON.parse(d); } catch (e) { d = null; }
+  if (result == null) {
+    try {
+      var fullRpc = await _sbClient.rpc('get_platform_public_settings');
+      if (!fullRpc.error && fullRpc.data) {
+        var d = fullRpc.data;
+        if (typeof d === 'string') {
+          try { d = JSON.parse(d); } catch (e) { d = null; }
+        }
+        if (d && d.announcements != null) result = _parsePlatformAnnouncements(d.announcements);
       }
-      if (d && d.announcements != null) return _parsePlatformAnnouncements(d.announcements);
+    } catch (e) {
+      console.warn('get_platform_public_settings announcements:', e);
     }
-  } catch (e) {
-    console.warn('get_platform_public_settings announcements:', e);
   }
-  return null;
+  if (result != null) _savePlatformAnnouncementsSessionCache(result);
+  return result;
 }
 
 function sb_subscriptionDaysLeft(subOrEndDate) {
@@ -3859,6 +3896,8 @@ if (typeof window !== 'undefined') {
   window.startPlatformGlobalsPolling = startPlatformGlobalsPolling;
   window.sb_fetchPlatformAnnouncementsRemote = sb_fetchPlatformAnnouncementsRemote;
   window._savePlatformAnnouncementsCache = _savePlatformAnnouncementsCache;
+  window._clearPlatformAnnouncementsSessionCache = _clearPlatformAnnouncementsSessionCache;
+  window.setupSupabaseRealtime = setupSupabaseRealtime;
 }
 
 async function sb_savePlatformGlobals(payload) {
@@ -3883,6 +3922,7 @@ async function sb_savePlatformGlobals(payload) {
     });
   }
   if (payload.announcements != null) {
+    _clearPlatformAnnouncementsSessionCache();
     rows.push({
       key: 'global:platform_announcements',
       value: JSON.stringify(payload.announcements || []),
@@ -5810,7 +5850,6 @@ document.addEventListener('DOMContentLoaded', function () {
     if (typeof hydratePlatformAnnouncementsFromCache === 'function') {
       hydratePlatformAnnouncementsFromCache();
     }
-    await setupSupabaseRealtime();
     if (typeof sb_fetchPublicSupportWhatsApp === 'function') {
       var wa = await sb_fetchPublicSupportWhatsApp();
       if (wa) {

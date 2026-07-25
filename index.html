@@ -14,14 +14,13 @@
 <link rel="dns-prefetch" href="https://cdnjs.cloudflare.com">
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&family=Tajawal:wght@400;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/sweetalert2/11.10.1/sweetalert2.all.min.js"></script>
 <script src="js/utils/swal-a11y.js"></script>
 <script src="js/utils/lazy-xlsx.js"></script>
 <script src="js/utils/lazy-chart.js"></script>
 <script src="js/utils/lazy-pdf.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" crossorigin="anonymous"></script>
+<script src="js/utils/lazy-leaflet.js"></script>
+<script src="js/utils/lazy-qrcode.js"></script>
 <script>window.global = window.global || window;</script>
 <script>
 window.addEventListener('error', function(e) {
@@ -32,22 +31,21 @@ window.addEventListener('error', function(e) {
 }, true);
 </script>
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://browser.sentry-cdn.com; script-src-attr 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com; font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com data:; img-src 'self' data: blob: https:; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.ipify.org https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://browser.sentry-cdn.com https://*.ingest.sentry.io https://*.sentry.io; frame-src 'self' https://www.openstreetmap.org https://*.openstreetmap.org; object-src 'none'; base-uri 'self';">
-<link rel="stylesheet" href="css/app.css?v=20260720a">
+<link rel="stylesheet" href="css/app.css?v=20260725g">
 <!-- defaults ثم local (اختياري) ثم public -->
 <script src="config/supabase.defaults.js"></script>
 <script src="config/local.config.js"></script>
-<script src="config/public.config.js?v=20260619"></script>
+<script src="config/public.config.js?v=20260725g"></script>
 <script src="js/core/app-version.js"></script>
 <script src="js/core/system-version-ui.js"></script>
-<script src="https://browser.sentry-cdn.com/8.45.0/bundle.tracing.min.js" crossorigin="anonymous"></script>
 <script src="js/core/sentry-init.js"></script>
 <script src="js/core/security.js"></script>
 <script src="js/core/safe-runtime.js"></script>
-<script src="js/core/html-sanitize.js?v=20260705"></script>
+<script src="js/core/html-sanitize.js?v=20260725g"></script>
 <!-- KYNO modules (incremental — no rewrite) -->
 <script src="js/kyno/utils/retry-logic.js"></script>
 <script src="js/kyno/security/sanitizer.js"></script>
-<script src="js/kyno/security/validation.js?v=20260705"></script>
+<script src="js/kyno/security/validation.js?v=20260725g"></script>
 <script src="js/kyno/security/rate-limiter.js"></script>
 <script src="js/kyno/core/logger.js"></script>
 <script src="js/kyno/core/error-handler.js"></script>
@@ -57,22 +55,22 @@ window.addEventListener('error', function(e) {
 <script src="js/core/memory-auth-storage.js"></script>
 <script src="js/core/tenant-guard.js"></script>
 <script src="js/core/time-format.js"></script>
-<script src="js/analytics/chart-analytics.js?v=20260725e"></script>
-<script src="js/core/cloud-sync.js?v=20260720d"></script>
-<script src="js/core/network-status.js?v=20260720d"></script>
+<script src="js/analytics/chart-analytics.js?v=20260725g"></script>
+<script src="js/core/cloud-sync.js?v=20260725g"></script>
+<script src="js/core/network-status.js?v=20260725g"></script>
 <script src="js/core/conflict-resolver.js"></script>
-<script src="js/core/leave-guard.js?v=20260720d"></script>
+<script src="js/core/leave-guard.js?v=20260725g"></script>
 <script src="js/core/rpc-mode.js"></script>
 <script src="js/core/employee-autocomplete.js"></script>
-<script src="js/core/storage.js?v=20260709a"></script>
+<script src="js/core/storage.js?v=20260725g"></script>
 <script src="js/core/session.js"></script>
-<script src="js/core/permissions.js?v=20260619"></script>
+<script src="js/core/permissions.js?v=20260725g"></script>
 <script src="js/core/permission-matrix.js"></script>
 <script src="js/core/super-admin-permissions.js"></script>
 <script src="js/utils/toast.js"></script>
 <script src="js/utils/loader.js"></script>
-<script src="js/utils/pdf.js?v=20260725f"></script>
-<script src="js/services/auth-api.js?v=20260718a"></script>
+<script src="js/utils/pdf.js?v=20260725g"></script>
+<script src="js/services/auth-api.js?v=20260725g"></script>
 </head>
 <body>
 
@@ -1179,16 +1177,16 @@ window.addEventListener('error', function(e) {
 
 <!-- Supabase SDK + tenant integration (JWT / RLS) — قبل سكربتات التطبيق -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" onerror="console.warn('مكتبة الاتصال لم تُحمّل')"></script>
-<script src="supabase_integration.js?v=20260725c" onerror="console.warn('ملفات الاتصال غير متوفرة')"></script>
+<script src="supabase_integration.js?v=20260725g" onerror="console.warn('ملفات الاتصال غير متوفرة')"></script>
 <script src="js/kyno/integration.js"></script>
-<script src="js/app/state.js?v=20260716f"></script>
-<script src="js/app/sync-state.js?v=20260722j"></script>
+<script src="js/app/state.js?v=20260725g"></script>
+<script src="js/app/sync-state.js?v=20260725g"></script>
 <script src="js/core/dom.js"></script>
-<script type="module" src="js/app/entry.js?v=20260716f"></script>
+<script type="module" src="js/app/entry.js?v=20260725g"></script>
 <script src="js/leaves/ui.js"></script>
-<script src="js/app/main.js?v=20260725f"></script>
-<script src="js/auth/admin-session.js?v=20260722j"></script>
-<script src="js/auth/login.js?v=20260722j"></script>
+<script src="js/app/main.js?v=20260725g"></script>
+<script src="js/auth/admin-session.js?v=20260725g"></script>
+<script src="js/auth/login.js?v=20260725g"></script>
 
 <!-- BARCODE SCAN MODAL -->
 <div id="barcode-modal">
@@ -1215,9 +1213,9 @@ window.addEventListener('error', function(e) {
 </div>
 
 
-<script src="js/app/ui-extra.js?v=20260705k"></script>
-<script src="js/app/ui-bindings.js?v=20260619"></script>
-<script src="js/attendance/slide-confirm.js?v=20260716e"></script>
+<script src="js/app/ui-extra.js?v=20260725g"></script>
+<script src="js/app/ui-bindings.js?v=20260725g"></script>
+<script src="js/attendance/slide-confirm.js?v=20260725g"></script>
 
 </body>
 </html>

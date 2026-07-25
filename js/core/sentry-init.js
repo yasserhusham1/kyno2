@@ -1,9 +1,15 @@
 /**
  * KYNO — Sentry error monitoring (optional via sentryDsn in local.config.js)
  * No PII: company_id, user_id, role, page only.
+ * SDK loads lazily after startup idle window — does not block first paint.
  */
 (function (global) {
   'use strict';
+
+  var SENTRY_URL = 'https://browser.sentry-cdn.com/8.45.0/bundle.tracing.min.js';
+  var _loadPromise = null;
+  var _initialized = false;
+  var _pendingCaptures = [];
 
   function cfg() {
     try {
@@ -32,7 +38,35 @@
     };
   }
 
+  function loadSentryScript() {
+    if (typeof global.Sentry !== 'undefined' && global.Sentry.init) return Promise.resolve();
+    if (_loadPromise) return _loadPromise;
+    _loadPromise = new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      s.src = SENTRY_URL;
+      s.async = true;
+      s.crossOrigin = 'anonymous';
+      s.onload = function () {
+        if (typeof global.Sentry !== 'undefined' && global.Sentry.init) resolve();
+        else { _loadPromise = null; reject(new Error('sentry_load_failed')); }
+      };
+      s.onerror = function () { _loadPromise = null; reject(new Error('sentry_load_failed')); };
+      document.head.appendChild(s);
+    });
+    return _loadPromise;
+  }
+
+  function flushPendingCaptures() {
+    if (!_pendingCaptures.length) return;
+    var queue = _pendingCaptures.slice();
+    _pendingCaptures = [];
+    queue.forEach(function (item) {
+      captureKynoError(item.err, item.extra);
+    });
+  }
+
   function initSentry() {
+    if (_initialized) return true;
     var c = cfg();
     if (!c.dsn || typeof global.Sentry === 'undefined' || !global.Sentry.init) return false;
     var release = (global.BasmaApp && global.BasmaApp.versionLabel) || 'v1.0.0';
@@ -54,17 +88,43 @@
         return event;
       }
     });
+    _initialized = true;
+    flushPendingCaptures();
     return true;
   }
 
+  function ensureSentryReady() {
+    var c = cfg();
+    if (!c.dsn) return Promise.resolve(false);
+    return loadSentryScript().then(function () {
+      return initSentry();
+    }).catch(function () {
+      return false;
+    });
+  }
+
   function captureKynoError(err, extra) {
+    var c = cfg();
+    if (!c.dsn) return;
+    if (!_initialized || typeof global.Sentry === 'undefined' || !global.Sentry.captureException) {
+      _pendingCaptures.push({ err: err, extra: extra });
+      ensureSentryReady();
+      return;
+    }
     var ctx = sessionContext();
     var payload = Object.assign({}, ctx, extra || {});
-    if (global.Sentry && global.Sentry.captureException) {
-      global.Sentry.withScope(function (scope) {
-        scope.setContext('kyno', payload);
-        global.Sentry.captureException(err instanceof Error ? err : new Error(String(err)));
-      });
+    global.Sentry.withScope(function (scope) {
+      scope.setContext('kyno', payload);
+      global.Sentry.captureException(err instanceof Error ? err : new Error(String(err)));
+    });
+  }
+
+  function scheduleDeferredInit() {
+    var run = function () { ensureSentryReady(); };
+    if (typeof global.requestIdleCallback === 'function') {
+      global.requestIdleCallback(run, { timeout: 4000 });
+    } else {
+      setTimeout(run, 2000);
     }
   }
 
@@ -75,8 +135,8 @@
   });
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initSentry);
+    document.addEventListener('DOMContentLoaded', scheduleDeferredInit);
   } else {
-    initSentry();
+    scheduleDeferredInit();
   }
 })(typeof window !== 'undefined' ? window : globalThis);

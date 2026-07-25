@@ -2355,8 +2355,17 @@ function previewGpsMap(options) {
   const key = la.toFixed(6) + '|' + ln.toFixed(6) + '|' + range + '|' + name;
   if (!options.force && key === _gpsLastPreviewKey) return true;
   _gpsLastPreviewKey = key;
-  if (!ensureGpsLeafletMap(la, ln, range, name)) {
-    fallbackGpsIframe(la, ln, range, name);
+  var showMap = function () {
+    if (!ensureGpsLeafletMap(la, ln, range, name)) {
+      fallbackGpsIframe(la, ln, range, name);
+    }
+  };
+  if (typeof ensureLeafletLoaded === 'function') {
+    ensureLeafletLoaded().then(showMap).catch(function () {
+      fallbackGpsIframe(la, ln, range, name);
+    });
+  } else {
+    showMap();
   }
   return true;
 }
@@ -4046,9 +4055,16 @@ function renderQrCodeWithPayload(elementId, payload) {
     return false;
   };
 
-  if (tryQrcodeJs()) return;
+  const render = function () {
+    if (tryQrcodeJs()) return;
+    finishWithImg();
+  };
 
-  finishWithImg();
+  if (typeof ensureQrcodeLoaded === 'function') {
+    ensureQrcodeLoaded().then(render).catch(function () { finishWithImg(); });
+    return;
+  }
+  render();
 }
 
 function renderQrCode(elementId, code) {
@@ -5134,6 +5150,9 @@ function _runLaunchApp() {
     setTimeout(function () { BasmaNetworkStatus.probe(true); }, 600);
   }
   if (typeof BasmaLeaveGuard !== 'undefined' && BasmaLeaveGuard.initLeaveGuard) BasmaLeaveGuard.initLeaveGuard();
+  if (typeof setupSupabaseRealtime === 'function' && currentUser) {
+    setupSupabaseRealtime().catch(function (e) { console.warn('setupSupabaseRealtime:', e); });
+  }
   startClock();
   if (typeof initEmployeeNameFilters === 'function') initEmployeeNameFilters();
 
