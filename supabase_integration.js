@@ -3729,14 +3729,41 @@ async function sb_getGlobalPlatformSettings() {
   }
 }
 
+var _SUPPORT_WA_SESSION_TTL_MS = 3600000;
+
+function _loadSupportWhatsAppSessionCache() {
+  try {
+    var wa = sessionStorage.getItem('basma_platform_support_whatsapp_cache');
+    var at = parseInt(sessionStorage.getItem('basma_platform_support_whatsapp_cache_at'), 10);
+    if (!wa || !at || (Date.now() - at) >= _SUPPORT_WA_SESSION_TTL_MS) return null;
+    wa = String(wa).trim();
+    return wa || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function _saveSupportWhatsAppSessionCache(wa) {
+  try {
+    wa = wa != null ? String(wa).trim() : '';
+    if (!wa) return;
+    sessionStorage.setItem('basma_platform_support_whatsapp_cache', wa);
+    sessionStorage.setItem('basma_platform_support_whatsapp_cache_at', String(Date.now()));
+  } catch (e) {}
+}
+
 async function sb_fetchPublicSupportWhatsApp() {
+  var cached = _loadSupportWhatsAppSessionCache();
+  if (cached) return cached;
   if (!_sbClient && !(await ensureSupabaseClient())) return null;
   try {
-    return await kynoWithRetry(async function () {
+    var wa = await kynoWithRetry(async function () {
       var rpcRes = await _sbClient.rpc('get_platform_support_whatsapp');
       if (!rpcRes.error && rpcRes.data) return String(rpcRes.data).trim();
       return null;
     }, { maxRetries: 2 });
+    if (wa) _saveSupportWhatsAppSessionCache(wa);
+    return wa;
   } catch (e) {
     console.warn('sb_fetchPublicSupportWhatsApp:', e);
   }
