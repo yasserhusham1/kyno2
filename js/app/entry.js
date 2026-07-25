@@ -14,9 +14,9 @@ import {
   markCompanyTenantFresh,
   clearCompanyTenantFresh,
   wipeTenantStorage
-} from './data.js?v=20260716f';
-import { buildEmployees } from '../employees/ui.js?v=20260716e';
-import { buildAttendance } from '../attendance/ui.js?v=20260709e';
+} from './data.js?v=20260725g';
+import { buildEmployees } from '../employees/ui.js?v=20260725g';
+import { buildAttendance } from '../attendance/ui.js?v=20260725g';
 import {
   buildDeviceManagement,
   openEmployeeDeviceEditor,
@@ -26,7 +26,7 @@ import {
   switchDeviceMgmtTab,
   debounceDeviceTrackingSearch,
   refreshDeviceTrackingLog
-} from '../attendance/device-mgmt.js?v=20260721a';
+} from '../attendance/device-mgmt.js?v=20260725g';
 
 window.loadData = loadData;
 window.saveData = saveData;
