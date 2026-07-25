@@ -31,6 +31,7 @@
   }
 
   async function captureHtmlToCanvas(html, width) {
+    if (typeof global.ensurePdfLibsLoaded === 'function') await global.ensurePdfLibsLoaded();
     if (typeof html2canvas === 'undefined') throw new Error('html2canvas غير جاهز');
     await waitForFonts();
     var iframe = document.createElement('iframe');

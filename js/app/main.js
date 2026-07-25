@@ -6915,6 +6915,7 @@ async function captureReportCanvas(reportHtml) {
 
 async function downloadReportPdfFromHtml(reportHtml, filename) {
   try {
+    if (typeof ensurePdfLibsLoaded === 'function') await ensurePdfLibsLoaded();
     var canvas = await captureReportCanvas(reportHtml);
     saveCanvasAsPdf(canvas, filename, 'landscape');
     return true;
