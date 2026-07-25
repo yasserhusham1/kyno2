@@ -6690,8 +6690,14 @@ function applyAttendanceFilters(list) {
   });
 }
 
-function exportAttExcel() {
+async function exportAttExcel() {
   if (!requireActionPermission('attendance', 'export')) return;
+  try {
+    if (typeof ensureXlsxLoaded === 'function') await ensureXlsxLoaded();
+  } catch (e) {
+    Swal.fire({ icon: 'error', title: 'خطأ', text: 'مكتبة XLSX غير محملة، الرجاء تحديث الصفحة', ...swalTheme() });
+    return;
+  }
   if (typeof XLSX === 'undefined') {
     Swal.fire({ icon: 'error', title: 'خطأ', text: 'مكتبة XLSX غير محملة، الرجاء تحديث الصفحة', ...swalTheme() });
     return;
@@ -8538,8 +8544,14 @@ function exportSalPdf() {
   }
 }
 
-function exportSalExcel() {
+async function exportSalExcel() {
   if (!requireActionPermission('salaries', 'export')) return;
+  try {
+    if (typeof ensureXlsxLoaded === 'function') await ensureXlsxLoaded();
+  } catch (e) {
+    Swal.fire({ icon: 'error', title: 'خطأ', text: 'مكتبة XLSX غير محملة', ...swalTheme() });
+    return;
+  }
   if (typeof XLSX === 'undefined') {
     Swal.fire({ icon: 'error', title: 'خطأ', text: 'مكتبة XLSX غير محملة', ...swalTheme() });
     return;
@@ -8864,7 +8876,7 @@ function deleteFinanceItem(id) {
   });
 }
 
-function exportFinanceReport() {
+async function exportFinanceReport() {
   if (!requireActionPermission('finance', 'export')) return;
   logActivity('export', 'finance', 'تصدير تقرير الحركات المالية Excel');
   const finTypeLabel = { deduction:'خصم', bonus:'مكافأة', loan:'سلفة' };
@@ -8872,6 +8884,9 @@ function exportFinanceReport() {
     const emp = employees.find(e => e.id === item.empId);
     return { 'الموظف': emp ? emp.name : '', 'التاريخ': item.date ? String(item.date).slice(0, 10) : '', 'اليوم': arabicDayNameFromDate(item.date), 'النوع': finTypeLabel[item.type] || item.type, 'المبلغ': exactMoneyValue(item.amount,0), 'الحالة': item.status, 'الأقساط': (item.paidInstallments || 0) + '/' + (item.installmentCount || 1), 'ملاحظة': item.note || '' };
   });
+  try {
+    if (typeof ensureXlsxLoaded === 'function') await ensureXlsxLoaded();
+  } catch (e) { /* fall through to info dialog */ }
   if (typeof XLSX === 'undefined') { Swal.fire({ icon:'info', title:'تقرير الحركات المالية', text:'عدد الحركات: ' + rows.length, ...swalTheme() }); return; }
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Finance');
@@ -10432,6 +10447,9 @@ async function exportNotificationsArchive() {
     Swal.fire({ icon: 'info', title: 'لا توجد بيانات', text: 'لا توجد إشعارات للتصدير', ...swalTheme() });
     return;
   }
+  try {
+    if (typeof ensureXlsxLoaded === 'function') await ensureXlsxLoaded();
+  } catch (e) { /* fall through to JSON export */ }
   if (typeof XLSX !== 'undefined') {
     var ws = XLSX.utils.json_to_sheet(rows);
     var wb = XLSX.utils.book_new();
