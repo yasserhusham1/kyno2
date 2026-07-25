@@ -264,15 +264,25 @@
   }
 
   function renderChart(key, canvasId, config) {
-    if (!global.Chart) return null;
-    var ctx = global.document && global.document.getElementById(canvasId);
-    if (!ctx) return null;
-    global.charts = global.charts || {};
-    if (global.charts[key]) {
-      try { global.charts[key].destroy(); } catch (e) { /* ignore */ }
+    function draw() {
+      if (!global.Chart) return null;
+      var ctx = global.document && global.document.getElementById(canvasId);
+      if (!ctx) return null;
+      global.charts = global.charts || {};
+      if (global.charts[key]) {
+        try { global.charts[key].destroy(); } catch (e) { /* ignore */ }
+      }
+      global.charts[key] = new global.Chart(ctx, config);
+      return global.charts[key];
     }
-    global.charts[key] = new global.Chart(ctx, config);
-    return global.charts[key];
+    if (global.Chart) return draw();
+    if (typeof global.ensureChartLoaded === 'function') {
+      global.ensureChartLoaded().then(draw).catch(function (e) {
+        console.warn('renderChart:', e);
+      });
+      return null;
+    }
+    return null;
   }
 
   function buildWeekChart(attData) {
