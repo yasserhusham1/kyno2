@@ -4609,17 +4609,6 @@ async function tryAutoEmployeeLogin() {
     let dev = emp ? getDevice(emp, cachedSlot) : null;
     var ipRestrictOn = appSettings.ipRestrict !== false;
 
-    if (!sessionActive && !cachedEmp && ipRestrictOn && typeof resolveRegisteredEmployeeFromServer === 'function') {
-      try {
-        var bootEmp = await resolveRegisteredEmployeeFromServer(fp, ipRestrictOn);
-        if (bootEmp) {
-          emp = bootEmp;
-          dev = getDevice(emp, cachedSlot) || (emp.devices || [])[0] || { slot: cachedSlot || 1 };
-        }
-      } catch (e) {
-        console.warn('tryAutoEmployeeLogin boot resolve:', e);
-      }
-    }
     if (!sessionActive && !cachedEmp && !emp) return false;
 
     if (sessionActive && cachedEmp && (!emp || !dev)) {
