@@ -8659,7 +8659,27 @@ function normalizeFinanceItem(item) {
   } else {
     item.installmentAmount = 0;
   }
+  // حركات قديمة/مستعادة بلا period: اربطها بشهر تاريخها الفعلي بدل تركها بلا فترة
+  // (بلا هذا الربط تُعامَل كـ"صالحة لكل شهر إلى الأبد" وتظل تظهر في كل كشوف الرواتب اللاحقة)
+  if (!item.period && item.date && /^\d{4}-\d{2}-\d{2}$/.test(String(item.date).slice(0, 10))) {
+    var finEmp = (employees || []).find(function (e) { return e && String(e.id) === String(item.empId); });
+    item.period = financePeriodFromDateLike(String(item.date).slice(0, 10), finEmp);
+  }
   return item;
+}
+
+/** فترة الراتب من تاريخ حركة مالية — لإصلاح/إسناد الحركات القديمة بلا period */
+function financePeriodFromDateLike(dateStr, emp) {
+  var iso = String(dateStr || '').slice(0, 10);
+  var ym = iso.slice(0, 7);
+  if (!/^\d{4}-\d{2}$/.test(ym)) return financePeriodForEmp(emp);
+  var type = (emp && emp.salaryType) || 'monthly';
+  if (type === 'biweekly') {
+    var day = parseInt(iso.slice(8, 10), 10) || 1;
+    var split = typeof getBiweeklySplitDay === 'function' ? getBiweeklySplitDay() : 15;
+    return ym + '-' + (day <= split ? 'H1' : 'H2');
+  }
+  return ym;
 }
 
 function currentLoanInstallmentAmount(item) {
@@ -8682,9 +8702,16 @@ function financePeriodForEmp(emp) {
 function financeItemAppliesToPeriod(item, period) {
   if (!item || !period) return false;
   var iperiod = String(item.period || '').trim();
-  if (!iperiod) return true;
-  if (iperiod === period) return true;
-  return iperiod.slice(0, 7) === String(period).slice(0, 7);
+  if (iperiod) {
+    return iperiod === period || iperiod.slice(0, 7) === String(period).slice(0, 7);
+  }
+  // بلا period (لا يُفترض بعد الآن — normalizeFinanceItem تُسنِده من التاريخ):
+  // احتياط أخير بشهر التاريخ/الإنشاء، وإلا لا تُطبَّق تلقائياً على كل الشهور
+  var dateYm = item.date ? String(item.date).slice(0, 7) : '';
+  var createdYm = item.createdAt ? String(item.createdAt).slice(0, 7) : '';
+  var ym = dateYm || createdYm;
+  if (ym) return ym === String(period).slice(0, 7);
+  return false;
 }
 
 function financeItemAppliesToSalary(item, emp) {
