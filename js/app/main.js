@@ -8659,7 +8659,27 @@ function normalizeFinanceItem(item) {
   } else {
     item.installmentAmount = 0;
   }
+  // حركات قديمة/مستعادة بلا period: اربطها بشهر تاريخها الفعلي بدل تركها بلا فترة
+  // (بلا هذا الربط تُعامَل كـ"صالحة لكل شهر إلى الأبد" وتظل تظهر في كل كشوف الرواتب اللاحقة)
+  if (!item.period && item.date && /^\d{4}-\d{2}-\d{2}$/.test(String(item.date).slice(0, 10))) {
+    var finEmp = (employees || []).find(function (e) { return e && String(e.id) === String(item.empId); });
+    item.period = financePeriodFromDateLike(String(item.date).slice(0, 10), finEmp);
+  }
   return item;
+}
+
+/** فترة الراتب من تاريخ حركة مالية — لإصلاح/إسناد الحركات القديمة بلا period */
+function financePeriodFromDateLike(dateStr, emp) {
+  var iso = String(dateStr || '').slice(0, 10);
+  var ym = iso.slice(0, 7);
+  if (!/^\d{4}-\d{2}$/.test(ym)) return financePeriodForEmp(emp);
+  var type = (emp && emp.salaryType) || 'monthly';
+  if (type === 'biweekly') {
+    var day = parseInt(iso.slice(8, 10), 10) || 1;
+    var split = typeof getBiweeklySplitDay === 'function' ? getBiweeklySplitDay() : 15;
+    return ym + '-' + (day <= split ? 'H1' : 'H2');
+  }
+  return ym;
 }
 
 function currentLoanInstallmentAmount(item) {
@@ -8682,9 +8702,16 @@ function financePeriodForEmp(emp) {
 function financeItemAppliesToPeriod(item, period) {
   if (!item || !period) return false;
   var iperiod = String(item.period || '').trim();
-  if (!iperiod) return true;
-  if (iperiod === period) return true;
-  return iperiod.slice(0, 7) === String(period).slice(0, 7);
+  if (iperiod) {
+    return iperiod === period || iperiod.slice(0, 7) === String(period).slice(0, 7);
+  }
+  // بلا period (لا يُفترض بعد الآن — normalizeFinanceItem تُسنِده من التاريخ):
+  // احتياط أخير بشهر التاريخ/الإنشاء، وإلا لا تُطبَّق تلقائياً على كل الشهور
+  var dateYm = item.date ? String(item.date).slice(0, 7) : '';
+  var createdYm = item.createdAt ? String(item.createdAt).slice(0, 7) : '';
+  var ym = dateYm || createdYm;
+  if (ym) return ym === String(period).slice(0, 7);
+  return false;
 }
 
 function financeItemAppliesToSalary(item, emp) {
@@ -8822,7 +8849,13 @@ function openFinanceItemForm(id) {
       if (!empId) { Swal.showValidationMessage('اختر الموظف'); return false; }
       if (!amount) { Swal.showValidationMessage('أدخل المبلغ'); return false; }
       const emp = employees.find(e => e.id === empId);
-      return { empId, type, amount, originalAmount: amount, loanMode, installmentCount, installmentAmount, note, date, period: financePeriodForEmp(emp), status: 'نشط' };
+      // الفترة تُشتق من تاريخ الحركة نفسه (وليس "الآن") — وإلا فإن أي تعديل بسيط (ملاحظة، مبلغ...)
+      // على حركة قديمة يُعيد ربطها بصمت بالشهر الحالي بدل شهرها الفعلي.
+      // الحالة تُحافَظ على قيمتها الأصلية عند التعديل — لا يوجد حقل للحالة في هذا النموذج أصلاً،
+      // فإجبارها دوماً على "نشط" كان يُعيد تفعيل حركة "مسدد"/"مطبق" في كل مرة تُعدَّل فيها.
+      const period = typeof financePeriodFromDateLike === 'function' ? financePeriodFromDateLike(date, emp) : financePeriodForEmp(emp);
+      const status = existing ? (existing.status || 'نشط') : 'نشط';
+      return { empId, type, amount, originalAmount: amount, loanMode, installmentCount, installmentAmount, note, date, period: period, status: status };
     }
   }).then(async r => {
     if (!r.isConfirmed || !r.value) return;
