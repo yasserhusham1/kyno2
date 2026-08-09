@@ -8849,7 +8849,13 @@ function openFinanceItemForm(id) {
       if (!empId) { Swal.showValidationMessage('اختر الموظف'); return false; }
       if (!amount) { Swal.showValidationMessage('أدخل المبلغ'); return false; }
       const emp = employees.find(e => e.id === empId);
-      return { empId, type, amount, originalAmount: amount, loanMode, installmentCount, installmentAmount, note, date, period: financePeriodForEmp(emp), status: 'نشط' };
+      // الفترة تُشتق من تاريخ الحركة نفسه (وليس "الآن") — وإلا فإن أي تعديل بسيط (ملاحظة، مبلغ...)
+      // على حركة قديمة يُعيد ربطها بصمت بالشهر الحالي بدل شهرها الفعلي.
+      // الحالة تُحافَظ على قيمتها الأصلية عند التعديل — لا يوجد حقل للحالة في هذا النموذج أصلاً،
+      // فإجبارها دوماً على "نشط" كان يُعيد تفعيل حركة "مسدد"/"مطبق" في كل مرة تُعدَّل فيها.
+      const period = typeof financePeriodFromDateLike === 'function' ? financePeriodFromDateLike(date, emp) : financePeriodForEmp(emp);
+      const status = existing ? (existing.status || 'نشط') : 'نشط';
+      return { empId, type, amount, originalAmount: amount, loanMode, installmentCount, installmentAmount, note, date, period: period, status: status };
     }
   }).then(async r => {
     if (!r.isConfirmed || !r.value) return;

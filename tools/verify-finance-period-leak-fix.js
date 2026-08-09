@@ -68,6 +68,42 @@ var paidLoan = { type: 'deduction', status: 'مسدد', amount: 10000, date: '20
 assert(financeApplies_OLD(paidLoan, '2026-05') === false, 'قديم: خصم مسدد مُستبعد أصلاً');
 assert(financeApplies_NEW(paidLoan, '2026-05') === false, 'جديد: خصم مسدد يبقى مُستبعداً');
 
+// -- محاكاة saas_v3_finance_totals/normalizeFinanceItem: اشتقاق الفترة من تاريخ الحركة --
+function financePeriodFromDateLike(dateStr) {
+  return String(dateStr || '').slice(0, 7);
+}
+
+// -- محاكاة preConfirm في openFinanceItemForm --
+function saveFinanceItem_OLD(existing, formDate, nowMonthKey) {
+  return {
+    date: formDate,
+    period: nowMonthKey, // كان دوماً "الشهر الحالي" بصرف النظر عن تاريخ الحركة أو حالة existing
+    status: 'نشط'        // كان دوماً يُعاد ضبطه إلى "نشط" حتى لو كان "مسدد"
+  };
+}
+function saveFinanceItem_NEW(existing, formDate) {
+  return {
+    date: formDate,
+    period: financePeriodFromDateLike(formDate),
+    status: existing ? (existing.status || 'نشط') : 'نشط'
+  };
+}
+
+console.log('\n=== تعديل حركة سُدِّدت في يوليو (تعديل بسيط: تصحيح ملاحظة فقط) — الشهر الحالي أغسطس ===');
+var julyPaidItem = { period: '2026-07', date: '2026-07-15', status: 'مسدد' };
+var savedOld = saveFinanceItem_OLD(julyPaidItem, '2026-07-15', '2026-08');
+assert(savedOld.period === '2026-08', 'الخلل القديم: التعديل ينقل الحركة إلى أغسطس رغم أن تاريخها يوليو');
+assert(savedOld.status === 'نشط', 'الخلل القديم: التعديل يعيد تفعيل حركة "مسدد" إلى "نشط" — تُخصم من جديد!');
+
+var savedNew = saveFinanceItem_NEW(julyPaidItem, '2026-07-15');
+assert(savedNew.period === '2026-07', 'الإصلاح: التعديل يحافظ على شهر يوليو (مُشتق من تاريخ الحركة نفسه)');
+assert(savedNew.status === 'مسدد', 'الإصلاح: التعديل يحافظ على حالة "مسدد" — لا يُعاد تفعيلها');
+
+console.log('\n=== إضافة حركة جديدة بتاريخ يدوي داخل شهر سابق (مثال: تسجيل متأخر لسلفة يوليو) ===');
+var newItemNew = saveFinanceItem_NEW(null, '2026-07-20');
+assert(newItemNew.period === '2026-07', 'الإصلاح: حركة جديدة بتاريخ يوليو تُربط بيوليو (وليس الشهر الحالي)');
+assert(newItemNew.status === 'نشط', 'الإصلاح: حركة جديدة افتراضياً "نشط"');
+
 console.log('\n────────────');
 console.log('النتيجة:', pass, 'نجحت،', fail, 'فشلت');
 if (fail) process.exit(1);
